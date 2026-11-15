@@ -1,0 +1,16 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+httpx>=0.28,<1
+yt-dlp>=2025.10.22
+faster-whisper>=1.1,<2
+# 可选：NVIDIA GPU 转写加速（约 1.2 GB）。装了之后把设置里的设备选“自动”即可，
+# 未安装或非 N 卡环境会自动回退 CPU，不影响功能。
+# nvidia-cublas-cu12>=12.4
+# nvidia-cudnn-cu12>=9.1
+av>=14.1,<15
+imageio-ffmpeg>=0.6,<1
+keyring>=25,<26
+pywebview>=6,<7
+pillow>=11,<14
+pywin32>=306; sys_platform == "win32"
+pytest>=8,<10

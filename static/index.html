@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>学习视频总结</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <img class="bg-character" src="/static/character.png" alt="" aria-hidden="true">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <img class="brand-mark" src="/static/avatar.png" alt="学习视频总结图标" width="44" height="44">
+        <div>
+          <h1>学习视频总结</h1>
+          <p>把视频内容整理成清晰、可复习的学习笔记</p>
+        </div>
+      </div>
+      <button id="settings-open" class="button button-secondary" type="button">设置</button>
+    </div>
+  </header>
+
+  <main class="page-shell">
+    <div class="page-main">
+      <section class="card source-card" aria-labelledby="source-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">新建任务</p>
+            <h2 id="source-heading">选择学习来源</h2>
+          </div>
+          <p class="privacy-note">只有点击“开始生成总结”才会转写、截取画面和调用模型</p>
+        </div>
+
+        <div class="source-layout">
+          <div class="source-main">
+          <div class="tabs" role="tablist" aria-label="视频来源">
+            <button id="tab-local" class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="panel-local">本地视频</button>
+            <button id="tab-bilibili" class="tab" type="button" role="tab" aria-selected="false" aria-controls="panel-bilibili" tabindex="-1">B站课程</button>
+          </div>
+
+          <div id="panel-local" class="source-panel" role="tabpanel" aria-labelledby="tab-local">
+            <button id="browse-button" class="drop-zone" type="button" aria-label="选择视频文件，也可以把视频拖到这里">
+              <span class="drop-zone-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 15.5V4"></path>
+                  <path d="m7 8.5 5-4.5 5 4.5"></path>
+                  <path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"></path>
+                </svg>
+              </span>
+              <span class="drop-zone-text">
+                <strong>选择视频文件</strong>
+                <small>点击选择，或把视频拖到这里；支持常见格式，文件只用于本地转写</small>
+              </span>
+            </button>
+            <div id="local-selection" class="selection-result" hidden>
+              <span class="selection-label">已选择</span>
+              <strong id="local-title"></strong>
+              <span id="local-path" class="path-text"></span>
+            </div>
+          </div>
+
+          <div id="panel-bilibili" class="source-panel" role="tabpanel" aria-labelledby="tab-bilibili" hidden>
+            <label class="field-label" for="bilibili-url">视频或课程链接</label>
+            <div class="inline-form">
+              <input id="bilibili-url" class="input" type="url" inputmode="url" placeholder="https://www.bilibili.com/video/..." autocomplete="off">
+              <button id="bilibili-info-button" class="button button-secondary" type="button">读取信息</button>
+            </div>
+            <p class="field-help">读取信息只获取标题和分P列表，不会创建任务。</p>
+            <div id="bilibili-result" class="selection-result selection-result-column" hidden>
+              <div>
+                <span class="selection-label">已读取</span>
+                <strong id="bilibili-title"></strong>
+              </div>
+              <div class="entry-field">
+                <label class="field-label" for="bilibili-entry">选择分P</label>
+                <select id="bilibili-entry" class="input"></select>
+              </div>
+            </div>
+          </div>
+          </div>
+
+          <div class="source-submit">
+            <p id="source-hint">请先选择一个本地视频文件。</p>
+            <button id="start-button" class="button button-primary button-large" type="button" disabled>开始生成总结</button>
+            <p class="history-note">历史任务保存在本地，关闭页面后仍可查看。</p>
+          </div>
+          <img class="panel-character" src="/static/thinking.png" alt="" aria-hidden="true">
+        </div>
+      </section>
+
+        <div class="workspace">
+      <aside class="card history-card" aria-labelledby="history-heading">
+        <div class="card-header">
+          <div class="history-title-row">
+            <h2 id="history-heading">历史任务</h2>
+            <span id="history-count" class="count-badge">0</span>
+            <span id="usage-badge" class="usage-badge" hidden></span>
+          </div>
+          <span id="history-refresh-status" class="refresh-status" role="status">正在读取</span>
+        </div>
+        <div id="history-empty" class="empty-state compact" hidden>
+          <div class="empty-illustration" aria-hidden="true"></div>
+          <h3>暂无历史任务</h3>
+          <p>选择视频并开始生成后，任务会出现在这里。</p>
+        </div>
+        <ul id="history-list" class="history-list" aria-label="历史任务列表"></ul>
+      </aside>
+
+      <section class="card detail-card" aria-labelledby="detail-heading">
+        <div id="job-empty" class="empty-state">
+          <div class="empty-illustration" aria-hidden="true"></div>
+          <h2 id="detail-heading">还没有选择任务</h2>
+          <p>从上方创建总结，或在左侧查看已有任务。</p>
+        </div>
+
+        <div id="job-detail" hidden>
+          <div class="job-header">
+            <div class="job-heading-wrap">
+              <div class="job-badges">
+                <span id="job-status" class="status-badge"></span>
+                <span id="job-provider" class="provider-badge" hidden></span>
+              </div>
+              <h2 id="job-title"></h2>
+              <p id="job-created" class="muted"></p>
+              <p id="job-usage" class="usage-line" hidden></p>
+            </div>
+            <div class="job-header-actions">
+              <button id="regenerate-job" class="button button-secondary button-small" type="button">重新生成</button>
+              <button id="delete-job" class="button button-danger-quiet button-small" type="button">删除历史</button>
+            </div>
+          </div>
+
+          <div id="job-progress-section" class="job-progress-section">
+            <div class="stage-row">
+              <span id="job-stage"></span>
+              <span id="job-progress-text" class="muted"></span>
+            </div>
+            <progress id="job-progress" max="100" value="0" aria-label="任务进度"></progress>
+            <button id="cancel-job" class="button button-danger-quiet button-small" type="button" hidden>取消任务</button>
+          </div>
+
+          <div id="confirmation-box" class="notice notice-warning" hidden>
+            <div>
+              <h3>转写内容较长</h3>
+              <p>已完成 <strong id="transcript-count"></strong> 字的转写。继续将调用模型生成总结，确认后开始。</p>
+            </div>
+            <button id="confirm-job" class="button button-primary" type="button">确认开始总结</button>
+          </div>
+
+          <div id="error-box" class="notice notice-error" role="alert" hidden>
+            <h3>任务处理失败</h3>
+            <p id="job-error"></p>
+          </div>
+
+          <section id="result-section" class="result-section" aria-labelledby="result-heading" hidden>
+            <div class="result-header">
+              <div>
+                <p class="eyebrow">学习成果</p>
+                <h3 id="result-heading">学习成果</h3>
+              </div>
+            </div>
+
+            <div id="backend-stale" class="notice notice-warning backend-stale" hidden>
+              <div>
+                <h3>应用后端还是旧版本</h3>
+                <p>练习题能显示，但计数和重新出题会失败。请完全退出应用（任务栏和托盘图标都要关掉）后重新打开。</p>
+              </div>
+            </div>
+
+            <div id="module-nav" class="module-nav">
+              <button class="module-card" type="button" data-module="notes">
+                <span class="module-card-head">
+                  <span class="module-card-title">学习笔记</span>
+                  <span class="module-card-arrow">→</span>
+                </span>
+                <span class="module-card-desc">知识点详解、对比辨析、考点提示与时间戳索引</span>
+                <span class="module-card-meta" id="nav-notes-meta"></span>
+              </button>
+              <button class="module-card" type="button" data-module="quiz">
+                <span class="module-card-head">
+                  <span class="module-card-title">练习题</span>
+                  <span class="module-card-arrow">→</span>
+                </span>
+                <span class="module-card-desc">按笔记出题，记录答错次数，标出复习优先级</span>
+                <span class="module-card-meta" id="nav-quiz-meta"></span>
+              </button>
+            </div>
+
+            <div id="module-notes" class="module-view" hidden>
+              <div class="module-toolbar">
+                <button class="button button-secondary button-small module-back" type="button">← 返回模块</button>
+                <div class="result-actions">
+                  <button id="copy-summary" class="button button-secondary button-small" type="button">复制笔记</button>
+                  <button id="export-summary" class="button button-secondary button-small" type="button">导出 Markdown</button>
+                </div>
+              </div>
+              <article id="summary-content" class="markdown-body"></article>
+            </div>
+
+            <div id="module-quiz" class="module-view" hidden>
+              <div class="module-toolbar">
+                <button class="button button-secondary button-small module-back" type="button">← 返回模块</button>
+                <div class="result-actions">
+                  <label class="quiz-sort" for="quiz-sort-by-level">
+                    <input type="checkbox" id="quiz-sort-by-level">
+                    <span>按掌握度排序</span>
+                  </label>
+                  <button id="quiz-regenerate" class="button button-secondary button-small" type="button" hidden>重新出题</button>
+                </div>
+              </div>
+              <div id="quiz-empty" class="quiz-empty" hidden>
+                <p id="quiz-empty-text">这条笔记还没有练习题。</p>
+                <button id="quiz-generate" class="button button-primary button-small" type="button">生成练习题</button>
+              </div>
+              <div id="quiz-list" class="quiz-list"></div>
+            </div>
+          </section>
+
+          <details id="visual-details" class="transcript-details" hidden>
+            <summary>
+              <span>课件画面提取内容</span>
+              <span class="muted">点击展开</span>
+            </summary>
+            <div id="visual-content" class="markdown-body visual-notes"></div>
+          </details>
+
+          <details id="transcript-details" class="transcript-details" hidden>
+            <summary>
+              <span>原始转写</span>
+              <span class="muted">点击展开</span>
+            </summary>
+            <div class="transcript-toolbar">
+              <button id="export-transcript" class="button button-secondary button-small" type="button">导出转写</button>
+            </div>
+            <pre id="transcript-content"></pre>
+          </details>
+        </div>
+        </section>
+        </div>
+    </div>
+  </main>
+
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-heading">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">本地应用</p>
+        <h2 id="settings-heading">设置</h2>
+      </div>
+      <button id="settings-close" class="button button-secondary button-small" type="button">关闭</button>
+    </div>
+
+    <div class="dialog-body">
+      <section class="settings-section" aria-labelledby="general-settings-heading">
+        <div class="settings-section-heading">
+          <div>
+            <h3 id="general-settings-heading">通用设置</h3>
+            <p>配置画面提取和本地语音转写参数。</p>
+          </div>
+        </div>
+        <form id="general-form">
+          <fieldset class="engine-options">
+            <legend>画面信息（课件 / 板书）</legend>
+            <label class="checkbox-row">
+              <input id="frames-enabled" type="checkbox">
+              <span><strong>提取视频画面</strong><small>按间隔截帧，用视觉模型读取课件、板书、代码等画面知识，与语音转写合并总结</small></span>
+            </label>
+            <div class="form-grid">
+              <label class="form-field">截帧间隔（秒）
+                <input id="frame-interval" class="input" type="number" min="5" max="600" step="5" required>
+              </label>
+              <label class="form-field">最多截取张数
+                <input id="max-frames" class="input" type="number" min="1" max="60" step="1" required>
+              </label>
+            </div>
+          </fieldset>
+          <fieldset class="engine-options">
+            <legend>笔记质量</legend>
+            <label class="checkbox-row">
+              <input id="deep-refine" type="checkbox">
+              <span><strong>深度整理（二次自查）</strong><small>生成后再让模型自查空洞与遗漏并重写，笔记更实；调用次数翻倍，模型计时费用也翻倍</small></span>
+            </label>
+            <label class="checkbox-row">
+              <input id="exam-mode" type="checkbox">
+              <span><strong>考研考点标注</strong><small>按 408 风格标注每个知识点可能的选择题/大题考法，并在易错点里写清"错成什么"</small></span>
+            </label>
+          </fieldset>
+          <div class="form-grid form-grid-four">
+            <label class="form-field">Whisper 模型
+              <select id="whisper-model" class="input">
+                <option value="tiny">tiny</option>
+                <option value="base">base</option>
+                <option value="small">small</option>
+                <option value="medium">medium</option>
+                <option value="large-v3">large-v3</option>
+                <option value="turbo">turbo（推荐：large 级质量，速度最快）</option>
+              </select>
+            </label>
+            <label class="form-field">运行设备
+              <select id="whisper-device" class="input">
+                <option value="cpu">CPU</option>
+                <option value="cuda">CUDA</option>
+                <option value="auto">自动</option>
+              </select>
+            </label>
+            <label class="form-field">计算类型
+              <select id="whisper-compute-type" class="input">
+                <option value="int8">int8</option>
+                <option value="int16">int16</option>
+                <option value="float16">float16</option>
+                <option value="float32">float32</option>
+              </select>
+            </label>
+            <label class="form-field">分段字数
+              <input id="chunk-chars" class="input" type="number" min="4000" max="50000" step="1000" required>
+            </label>
+          </div>
+          <div class="form-footer">
+            <span id="general-status" class="form-status" role="status"></span>
+            <button id="save-general" class="button button-primary" type="submit" disabled>保存通用设置</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="settings-section" aria-labelledby="api-settings-heading">
+        <div class="settings-section-heading">
+          <div>
+            <h3 id="api-settings-heading">API 配置</h3>
+            <p>连接 OpenAI 兼容的模型服务。推荐智谱：Base URL 填 <code>https://open.bigmodel.cn/api/paas/v4</code>，文本模型填 <code>glm-5.3-flash</code>（新用户赠送额度），视觉模型填 <code>glm-4v-flash</code>（免费）。</p>
+          </div>
+          <span id="api-configured" class="config-badge">未配置</span>
+        </div>
+        <form id="api-form">
+          <div class="form-grid">
+            <label class="form-field">Base URL
+              <input id="api-base-url" class="input" type="url" placeholder="https://api.example.com/v1" autocomplete="off">
+            </label>
+            <label class="form-field">文本模型名称
+              <span class="combo">
+                <input id="api-model" class="input combo-input" type="text" placeholder="glm-5.3-flash" autocomplete="off">
+                <button id="model-toggle" class="combo-toggle" type="button" aria-label="展开可用模型列表" aria-expanded="false">▾</button>
+                <ul id="model-menu" class="combo-menu" role="listbox" aria-label="可用模型" hidden></ul>
+              </span>
+            </label>
+          </div>
+          <div class="form-grid">
+            <label class="form-field">视觉模型名称（用于读取课件画面）
+              <span class="combo">
+                <input id="api-vision-model" class="input combo-input" type="text" placeholder="glm-4v-flash" autocomplete="off">
+                <button id="vision-toggle" class="combo-toggle" type="button" aria-label="展开可选视觉模型" aria-expanded="false">▾</button>
+                <ul id="vision-menu" class="combo-menu" role="listbox" aria-label="可选视觉模型" hidden></ul>
+              </span>
+            </label>
+            <label class="form-field">推理强度（仅推理模型有效）
+              <select id="api-reasoning-effort" class="input">
+                <option value="low">低（快，推荐）</option>
+                <option value="high">高（慢，笔记更细）</option>
+                <option value="max">最高（最慢）</option>
+                <option value="">不指定（服务端默认）</option>
+              </select>
+            </label>
+          </div>
+          <div class="field-row-inline">
+            <button id="fetch-models" class="button button-secondary button-small" type="button" disabled>获取可用模型</button>
+            <span id="models-status" class="field-help">点此读取该 Key 可用的文本模型；视觉模型的下拉会实测哪些能读图。</span>
+          </div>
+          <p class="field-help">glm-5 系列等推理模型默认思考很久，单次可能超过 4 分钟；选「低」可省时间且这类笔记任务质量几乎没差别。glm-4-flash 等非推理模型会忽略此项。</p>
+          <label class="form-field">API Key
+            <input id="api-key" class="input" type="password" placeholder="留空表示不更改已保存的密钥" autocomplete="new-password">
+          </label>
+          <p class="field-help">密钥仅保存在本机，页面不会回显已保存的密钥。</p>
+          <div class="form-footer form-footer-wrap">
+            <span id="api-status" class="form-status" role="status">测试连接会实际调用模型，产生极少量 API 用量；请先保存修改。</span>
+            <div class="button-group">
+              <button id="test-api" class="button button-secondary" type="button" disabled>测试连接</button>
+              <button id="save-api" class="button button-primary" type="submit" disabled>保存 API 配置</button>
+            </div>
+          </div>
+        </form>
+      </section>
+    </div>
+  </dialog>
+
+  <div id="text-menu" class="text-menu" role="menu" aria-label="文字操作" hidden>
+    <button class="text-menu-item" type="button" role="menuitem" data-action="copy-selection">复制选中文字</button>
+    <button class="text-menu-item" type="button" role="menuitem" data-action="select-all">全选本段</button>
+    <button class="text-menu-item" type="button" role="menuitem" data-action="copy-all">复制整篇笔记</button>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+</body>
+</html>

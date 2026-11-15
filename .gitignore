@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+data/*.db
+data/*.json
+data/cache/
+data/*.log
+
+# 整个 data/ 都是本机运行产物（转写、笔记、截图缓存、历史库），不进版本库
+data/
+# 本地记忆与工具缓存，含个人上下文
+.workbuddy/
+.pytest_cache/
+*.log
