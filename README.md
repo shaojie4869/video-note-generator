@@ -28,8 +28,8 @@
 ## 安装
 
 ```bash
-git clone <本仓库地址>
-cd 学习视频总结程序
+git clone https://github.com/shaojie4869/video-note-generator.git
+cd video-note-generator
 
 python -m venv .venv
 .venv\Scripts\activate
