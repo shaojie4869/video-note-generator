@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from study_buddy import __version__
 from study_buddy.config import BASE_DIR, SettingsManager
 from study_buddy.db import Database
-from study_buddy.errors import ProviderError
+from study_buddy.build_info import build_id
 from study_buddy.jobs import JobManager
 from study_buddy.schemas import ApiSettings, BilibiliInfoRequest, GeneralSettings, JobCreate
 from study_buddy.sources import BilibiliClient, SourceError, ffmpeg_executable, validate_local_video
@@ -28,6 +28,10 @@ database = Database()
 summary_service = SummaryService(settings, database)
 bilibili_client = BilibiliClient()
 jobs = JobManager(database, settings, summary_service, bilibili_client)
+
+# 只在启动时算一次：如果每次请求都从磁盘现算，旧进程会算出新指纹，
+# 启动器就永远判断不出「我在跑旧代码」。
+BUILD_ID = build_id()
 
 # 视觉能力探测要逐个模型发图试探，结果缓存一段时间，避免反复消耗额度。
 _VISION_PROBE: dict = {"signature": "", "vision": [], "at": 0.0}
@@ -70,6 +74,7 @@ def health() -> dict:
     return {
         "ok": True,
         "version": __version__,
+        "build": BUILD_ID,
         "ffmpeg": ffmpeg_executable(),
         "features": ["questions", "question_stats"],
     }

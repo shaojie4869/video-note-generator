@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import subprocess
 import time
 import urllib.request
@@ -9,17 +10,62 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 URL = "http://127.0.0.1:8765"
+PORT = 8765
 TITLE = "学习视频总结"
 ICON = BASE_DIR / "assets" / "icon.ico"
 
 
-def is_running() -> bool:
+def health() -> dict | None:
     request = urllib.request.Request(f"{URL}/api/health", headers={"X-Study-Buddy": "1"})
     try:
         with urllib.request.urlopen(request, timeout=2) as response:
-            return response.status == 200
+            return json.loads(response.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def is_running() -> bool:
+    return health() is not None
+
+
+def local_build() -> str:
+    from study_buddy.build_info import build_id
+
+    return build_id()
+
+
+def has_active_job() -> bool:
+    request = urllib.request.Request(f"{URL}/api/jobs", headers={"X-Study-Buddy": "1"})
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
     except Exception:
         return False
+    return any(item.get("status") in {"queued", "running"} for item in payload.get("jobs", []))
+
+
+def stop_server(port: int = PORT) -> bool:
+    """结束占用端口的监听进程，用于替换掉跑着旧代码的后台服务。"""
+    try:
+        finished = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"], capture_output=True, text=True, timeout=15
+        )
+        output = finished.stdout or ""
+    except Exception:
+        return False
+    pids = {
+        parts[4]
+        for parts in (line.split() for line in output.splitlines())
+        if len(parts) >= 5 and parts[3] == "LISTENING" and parts[1].endswith(f":{port}")
+    }
+    for pid in pids:
+        subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if not is_running():
+            return True
+        time.sleep(0.3)
+    return not is_running()
 
 
 def start_server() -> None:
@@ -42,6 +88,41 @@ def start_server() -> None:
 
 def show_error(message: str) -> None:
     ctypes.windll.user32.MessageBoxW(0, message, TITLE, 0x10)
+
+
+def ask(message: str) -> bool:
+    # MB_YESNO(0x04) + MB_ICONQUESTION(0x20)，返回 6 表示选了「是」。
+    return ctypes.windll.user32.MessageBoxW(0, message, TITLE, 0x04 | 0x20) == 6
+
+
+def ensure_server() -> bool:
+    """保证 8765 上跑的是磁盘上的当前代码。
+
+    只判断「端口有响应」是不够的：改完 Python 再打开应用，会直接连回旧进程，
+    用户看到的还是旧报错。所以要比对源码指纹，不一致就重启后台服务。
+    """
+    if not is_running():
+        start_server()
+        return True
+
+    if (health() or {}).get("build") == local_build():
+        return True
+
+    if has_active_job():
+        show_error(
+            "程序已更新，但还有任务正在处理。\n"
+            "请等任务结束后关闭应用再重新打开，新版本才会生效。"
+        )
+        return True
+
+    if not ask("程序代码已更新，需要重启后台服务才能生效。\n\n现在重启吗？"):
+        return True
+
+    if not stop_server():
+        show_error("旧的后台服务未能结束。请在任务管理器结束 pythonw.exe 后重新打开应用。")
+        return False
+    start_server()
+    return True
 
 
 def open_native_window() -> None:
@@ -91,8 +172,8 @@ def open_native_window() -> None:
 
 def main() -> None:
     try:
-        if not is_running():
-            start_server()
+        if not ensure_server():
+            return
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
             if is_running():
