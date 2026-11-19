@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import logging
 import re
 import threading
 import time
@@ -15,6 +16,8 @@ import httpx
 
 from .config import SettingsManager
 from .errors import JobCancelled, ProviderError
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """你是 408 计算机考研专业课的笔记整理专家。你的产出要能直接拿去复习和做题，不是内容摘要。
 
@@ -200,6 +203,32 @@ class OpenAICompatibleProvider:
             payload["reasoning_effort"] = effort
         return self._post(payload, cancelled, purpose)
 
+    def _post_vision(self, url: str, api_key: str, payload: dict) -> httpx.Response:
+        """视觉请求补一次退避重试：连接抖动和 5xx 都常见，失败一次不值得整单报废。"""
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = httpx.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=300,
+                )
+            except httpx.TimeoutException as exc:
+                last_error = exc
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                raise
+            if response.status_code in {429, 500, 502, 503, 504} and attempt == 0:
+                time.sleep(2)
+                continue
+            return response
+        raise last_error or ProviderError("视觉模型请求失败。")
+
     def complete_vision(
         self, prompt: str, images: list[Path], cancelled: threading.Event | None = None
     ) -> str:
@@ -213,18 +242,20 @@ class OpenAICompatibleProvider:
                 raise JobCancelled()
             content.append({"type": "image_url", "image_url": {"url": _encode_frame(image)}})
         base_url, _, api_key = self._config()
+        payload: dict = {
+            "model": vision_model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0.2,
+            "stream": False,
+        }
+        # 视觉模型同样是推理模型：默认档的隐藏思考能吃掉几千 token，
+        # 实测同样 8 张图，low 档 17 秒、默认档 80 秒以上，末批会直接顶到超时。
+        # 注意不能用 max_tokens 限流——思考会把额度占满，正文变成空字符串。
+        effort = (config.get("reasoning_effort") or "").strip()
+        if effort:
+            payload["reasoning_effort"] = effort
         try:
-            response = httpx.post(
-                self.endpoint(base_url),
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                json={
-                    "model": vision_model,
-                    "messages": [{"role": "user", "content": content}],
-                    "temperature": 0.2,
-                    "stream": False,
-                },
-                timeout=300,
-            )
+            response = self._post_vision(self.endpoint(base_url), api_key, payload)
         except httpx.HTTPError as exc:
             raise ProviderError(f"视觉模型网络请求失败：{exc}") from exc
         try:
@@ -325,30 +356,52 @@ class OpenAICompatibleProvider:
     def describe_frames(
         self, frames: list[Path], cancelled: threading.Event | None = None
     ) -> str:
-        # 优先分批识别；若模型限制单张图片（如免费的 glm-4v-flash 仅支持 1 张），
-        # 捕获报错后自动降级为逐张识别。
+        """分批识别画面，单批失败就拆半重试，仍失败则跳过该批。
+
+        画面只是笔记的辅助材料：转写已经花掉大部分时间，为几张截图丢掉整单不划算。
+        拆半既能应对「模型限制单张图片」，也能应对偶发超时。
+        """
         batch_size = 8
-        batches = [frames[i : i + batch_size] for i in range(0, len(frames), batch_size)] or [[]]
         results: list[str] = []
-        for index, batch in enumerate(batches):
-            if cancelled and cancelled.is_set():
-                raise JobCancelled()
-            header = f"{VISION_PROMPT}\n（本批次为第 {index + 1}/{len(batches)} 批画面）"
-            try:
-                part = self.complete_vision(header, batch, cancelled)
-            except ProviderError as exc:
-                if "图片数量" not in str(exc) or len(batch) <= 1:
-                    raise
-                for frame in batch:
-                    if cancelled and cancelled.is_set():
-                        raise JobCancelled()
-                    single = self.complete_vision(VISION_PROMPT, [frame], cancelled)
-                    if single:
-                        results.append(single)
-                continue
-            if part:
-                results.append(part)
-        return "\n".join(results).strip()
+        for index, start in enumerate(range(0, len(frames), batch_size)):
+            batch = frames[start : start + batch_size]
+            results.extend(self._describe_batch(batch, index, cancelled, depth=0))
+        return "\n".join(part for part in results if part).strip()
+
+    def _describe_batch(
+        self,
+        batch: list[Path],
+        index: int,
+        cancelled: threading.Event | None,
+        depth: int,
+    ) -> list[str]:
+        if cancelled and cancelled.is_set():
+            raise JobCancelled()
+        if not batch:
+            return []
+        header = f"{VISION_PROMPT}\n（本批次为第 {index + 1} 批画面，共 {len(batch)} 张）"
+        try:
+            part = self.complete_vision(header, batch, cancelled)
+        except JobCancelled:
+            raise
+        except ProviderError as exc:
+            message = str(exc)
+            if len(batch) > 1 and depth < 4:
+                if "图片数量" in message or "image" in message.lower():
+                    # 模型只接受单张图片：直接逐张，不必浪费轮次去拆半。
+                    return [
+                        part
+                        for frame in batch
+                        for part in self._describe_batch([frame], index, cancelled, depth + 1)
+                    ]
+                logger.warning("画面第 %d 批 %d 张识别失败，拆半重试：%s", index + 1, len(batch), exc)
+                middle = len(batch) // 2
+                return self._describe_batch(
+                    batch[:middle], index, cancelled, depth + 1
+                ) + self._describe_batch(batch[middle:], index, cancelled, depth + 1)
+            logger.warning("跳过一张画面（第 %d 批）：%s", index + 1, exc)
+            return []
+        return [part] if part else []
 
 
 @dataclass

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,8 @@ from .summarizer import OpenAICompatibleProvider, SummaryService
 from .transcription import Transcriber, TranscriptionError
 
 LONG_TRANSCRIPT_THRESHOLD = 50000
+
+logger = logging.getLogger(__name__)
 
 
 class JobManager:
@@ -149,11 +152,25 @@ class JobManager:
             # 重新生成：转写已存在（复用自失败任务），直接进入总结流程。
             transcript = job["transcript"]
             self.db.update_job(job_id, status="running", stage="复用已完成的转写", progress=65)
-            if frames_enabled and job["source_type"] == "local":
-                try:
-                    video_path = validate_local_video(job["source_ref"])
-                except SourceError:
-                    video_path = None
+            if frames_enabled and not job.get("visual_notes"):
+                # 上次很可能就是失败在画面识别这一步：转写还在，画面笔记是空的。
+                # 这时必须重新拿到视频，否则重试会静默丢掉整段课件画面。
+                if job["source_type"] == "local":
+                    try:
+                        video_path = validate_local_video(job["source_ref"])
+                    except SourceError:
+                        video_path = None
+                else:
+                    self.db.update_job(job_id, stage="重新下载视频用于截帧", progress=65)
+                    self._check_cancelled(event)
+                    try:
+                        prepared = self.bilibili.prepare(
+                            job["source_ref"], job["entry_index"], job_id, want_video=True
+                        )
+                        video_path = prepared.media_path
+                    except (SourceError, OSError) as exc:
+                        logger.warning("重新下载视频失败，跳过画面信息：%s", exc)
+                        video_path = None
         else:
             self.db.update_job(job_id, status="running", stage="正在读取视频", progress=3)
             self._check_cancelled(event)
@@ -227,7 +244,15 @@ class JobManager:
         self._check_cancelled(event)
         self.db.update_job(job_id, stage="正在识别课件画面", progress=66)
         provider = OpenAICompatibleProvider(self.settings, self.db.add_usage, job_id)
-        notes = provider.describe_frames(frames, event)
+        try:
+            notes = provider.describe_frames(frames, event)
+        except JobCancelled:
+            raise
+        except ProviderError as exc:
+            # 画面信息是补充材料：识别失败也要把转写和笔记正常交付出去，
+            # 不能因为几张截图丢掉已经花掉几分钟的转写结果。
+            logger.warning("课件画面识别失败，跳过画面信息：%s", exc)
+            notes = ""
         self.db.update_job(job_id, visual_notes=notes)
 
     async def _run_summary_only(self, job_id: str, event: threading.Event) -> None:
