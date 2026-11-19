@@ -217,6 +217,30 @@ def extract_keyframes(
     return [frame for frame in frames if frame.stat().st_size > 0][:cap]
 
 
+def _friendly_ytdlp_hint(exc: Exception) -> str | None:
+    """把 yt-dlp 的英文报错翻译成用户能动手解决的话。
+
+    默认的 "Requested format is not available" 会把「链接无效」误导成「画质选不到」，
+    用户会一直以为是清晰度的问题。
+    """
+    message = str(exc)
+    lowered = message.lower()
+    if "keyerror('bvid')" in lowered or "extractor error" in lowered:
+        return (
+            "视频解析失败：这个 BV 号取不到内容。多半是链接复制不完整，"
+            "或视频已被删除 / 设为私密，请回浏览器地址栏重新复制完整链接。"
+        )
+    if "62002" in message or "private" in lowered or "不可见" in message:
+        return "视频已设为私密或已被删除，无法访问。"
+    if "-404" in message or "啥都木有" in message:
+        return "视频不存在，请检查 BV 号是否完整。"
+    if "requested format is not available" in lowered:
+        return "该视频没有可下载的音轨或视频流（可能是付费、会员专享或地区限制）。"
+    if "premium" in lowered or "大会员" in message or "需要登录" in message:
+        return "该视频需要大会员或登录后才能获取。"
+    return None
+
+
 class BilibiliClient:
     def _options(self) -> dict[str, Any]:
         return {
@@ -225,6 +249,14 @@ class BilibiliClient:
             "noplaylist": False,
             "socket_timeout": 30,
             "retries": 2,
+            # B 站会按 UA 判断是否放行，yt-dlp 默认 UA 带 "yt-dlp" 字样容易被拦。
+            "http_headers": {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://www.bilibili.com/",
+            },
         }
 
     @staticmethod
@@ -250,7 +282,8 @@ class BilibiliClient:
             with yt_dlp.YoutubeDL(self._options()) as ydl:
                 extracted = ydl.extract_info(url, download=False)
         except Exception as exc:
-            raise SourceError(f"无法读取 B站视频：{exc}") from exc
+            hint = _friendly_ytdlp_hint(exc)
+            raise SourceError(hint or f"无法读取 B站视频：{exc}") from exc
         entries = [entry for entry in extracted.get("entries", []) if entry]
         if not entries:
             entries = [extracted]
@@ -289,7 +322,8 @@ class BilibiliClient:
         except SourceError:
             raise
         except Exception as exc:
-            raise SourceError(f"读取 B站视频失败：{exc}") from exc
+            hint = _friendly_ytdlp_hint(exc)
+            raise SourceError(hint or f"读取 B站视频失败：{exc}") from exc
         try:
             download_options = self._options()
             if want_video:
@@ -319,7 +353,8 @@ class BilibiliClient:
                 ydl.download([download_url])
         except Exception as exc:
             kind = "视频" if want_video else "音频"
-            raise SourceError(f"该视频没有可用字幕，{kind}获取也失败：{exc}") from exc
+            hint = _friendly_ytdlp_hint(exc)
+            raise SourceError(hint or f"该视频没有可用字幕，{kind}获取也失败：{exc}") from exc
         wanted = VIDEO_EXTENSIONS if want_video else MEDIA_EXTENSIONS
         media_files = [
             path for path in work_dir.iterdir() if path.suffix.lower() in wanted and path.stat().st_size > 0
