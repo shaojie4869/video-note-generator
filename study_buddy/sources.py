@@ -249,6 +249,9 @@ class BilibiliClient:
             "noplaylist": False,
             "socket_timeout": 30,
             "retries": 2,
+            # B 站音视频是分离的 DASH 流，合并时必须有 ffmpeg；
+            # imageio-ffmpeg 的二进制不在 PATH 里，必须显式指定，否则合并会失败。
+            "ffmpeg_location": ffmpeg_executable(),
             # B 站会按 UA 判断是否放行，yt-dlp 默认 UA 带 "yt-dlp" 字样容易被拦。
             "http_headers": {
                 "User-Agent": (
@@ -330,7 +333,18 @@ class BilibiliClient:
                 download_options.update(
                     {
                         "noplaylist": not is_playlist,
-                        "format": "worst[height<=480][ext=mp4]/worst[height<=480]/worst",
+                        # B 站只提供「纯视频流 + 纯音频流」，没有合体的 progressive 格式。
+                        # 而 yt-dlp 的 worst 语义是「同时含音视频的最差格式」，在这些站上匹配为空，
+                        # 会报 Requested format is not available。所以这里必须用 worstvideo+worstaudio，
+                        # 末尾的 worst 只作为其它站点（确有合体格式）的兜底。
+                        "format": (
+                            "worstvideo[height<=480]+worstaudio/"
+                            "worstvideo[height<=480]+bestaudio/"
+                            "worstvideo+worstaudio/"
+                            "worstvideo+bestaudio/"
+                            "worst[height<=480]/worst"
+                        ),
+                        "merge_output_format": "mp4",
                         "outtmpl": str(work_dir / "video.%(ext)s"),
                         "overwrites": True,
                     }
