@@ -19,7 +19,13 @@ from study_buddy.config import BASE_DIR, SettingsManager
 from study_buddy.db import Database
 from study_buddy.build_info import build_id
 from study_buddy.jobs import JobManager
-from study_buddy.schemas import ApiSettings, BilibiliInfoRequest, GeneralSettings, JobCreate
+from study_buddy.schemas import (
+    ApiSettings,
+    BilibiliInfoRequest,
+    GeneralSettings,
+    JobCreate,
+    JobRename,
+)
 from study_buddy.sources import BilibiliClient, SourceError, ffmpeg_executable, validate_local_video
 from study_buddy.summarizer import OpenAICompatibleProvider, SummaryService
 
@@ -196,6 +202,19 @@ async def create_job(payload: JobCreate) -> dict:
         return {"job": job, "reused": reused}
     except (SourceError, ValueError) as exc:
         raise error_http(exc) from exc
+
+
+@app.patch("/api/jobs/{job_id}")
+def rename_job(job_id: str, payload: JobRename) -> dict:
+    """改标题。历史列表里同名任务多了以后，靠它区分。"""
+    job = database.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="标题不能为空。")
+    database.update_job(job_id, title=title)
+    return {"job": database.get_job(job_id)}
 
 
 @app.get("/api/jobs")

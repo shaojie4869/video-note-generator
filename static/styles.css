@@ -834,6 +834,54 @@ select.input {
   font-size: 22px;
 }
 
+/* 标题 + 重命名按钮：按钮平时很淡，悬停标题行才明显 */
+.job-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.job-title-row h2 {
+  min-width: 0;
+}
+
+.job-title-edit {
+  flex: none;
+  margin-top: 9px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 150ms ease, background 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+
+.job-title-row:hover .job-title-edit,
+.job-title-edit:focus-visible {
+  opacity: 1;
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--primary);
+}
+
+.job-title-edit:hover {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+}
+
+.job-title-input {
+  margin: 4px 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+  max-width: 100%;
+}
+
 .job-heading-wrap p {
   margin-bottom: 0;
   font-size: 11px;

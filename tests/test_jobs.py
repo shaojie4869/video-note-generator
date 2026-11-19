@@ -39,3 +39,22 @@ def test_force_reuses_transcript_from_failed_job(tmp_path, monkeypatch):
         assert job["transcript"] == "旧转写内容"
 
     asyncio.run(scenario())
+
+
+def test_refresh_bilibili_title_replaces_placeholder(tmp_path):
+    """重新生成会复制原任务标题，占位标题必须在这一步换成真实标题。"""
+
+    class StubClient:
+        def info(self, url):
+            return {"title": "合集标题", "entries": [{"title": "BOK408 p10 3-4 cache"}]}
+
+    database = Database(tmp_path / "history.db")
+    manager = JobManager(database, settings=None, summary=None)
+    manager.bilibili = StubClient()
+    job = database.create_job(
+        "bilibili", "https://www.bilibili.com/video/BV1x/", "B站课程", "key", 0
+    )
+
+    manager._refresh_bilibili_title(job["id"], job)
+
+    assert database.get_job(job["id"])["title"] == "BOK408 p10 3-4 cache"

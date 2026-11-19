@@ -40,3 +40,7 @@ class JobCreate(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class JobRename(BaseModel):
+    title: str = Field(min_length=1, max_length=120)

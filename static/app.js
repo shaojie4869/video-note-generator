@@ -66,7 +66,7 @@ function init() {
     'job-empty', 'job-detail', 'job-title', 'job-status', 'job-provider', 'job-created', 'job-usage', 'job-stage',
     'job-progress-section', 'job-progress', 'job-progress-text', 'cancel-job', 'confirmation-box', 'transcript-count', 'confirm-job',
     'error-box', 'job-error', 'result-section', 'copy-summary', 'export-summary', 'summary-content',
-    'visual-details', 'visual-content', 'transcript-details', 'transcript-content', 'export-transcript', 'regenerate-job', 'delete-job',
+    'visual-details', 'visual-content', 'transcript-details', 'transcript-content', 'export-transcript', 'regenerate-job', 'delete-job', 'rename-job',
     'module-nav', 'module-notes', 'module-quiz', 'nav-notes-meta', 'nav-quiz-meta',
     'quiz-list', 'quiz-empty', 'quiz-empty-text', 'quiz-generate', 'quiz-regenerate', 'quiz-sort-by-level',
     'backend-stale', 'text-menu',
@@ -141,6 +141,7 @@ function bindEvents() {
   elements.cancelJob.addEventListener('click', cancelSelectedJob);
   elements.confirmJob.addEventListener('click', confirmSelectedJob);
   elements.regenerateJob.addEventListener('click', regenerateSelectedJob);
+  elements.renameJob.addEventListener('click', startRenameJob);
   elements.deleteJob.addEventListener('click', () => {
     if (state.currentJob) {
       deleteJob(state.currentJob.id, elements.deleteJob);
@@ -434,6 +435,65 @@ function regenerateSelectedJob() {
   }, elements.regenerateJob);
 }
 
+// 标题内联编辑：点笔图标把标题换成输入框，回车保存、Esc 取消、失焦保存。
+// 不用 window.prompt，WebView 里对原生对话框的支持不确定。
+function startRenameJob() {
+  const job = state.currentJob;
+  if (!job || !job.id || elements.jobTitle.querySelector('input')) {
+    return;
+  }
+  const original = elements.jobTitle.textContent;
+  const input = document.createElement('input');
+  input.className = 'input job-title-input';
+  input.type = 'text';
+  input.maxLength = 120;
+  input.value = job.title || '';
+  elements.jobTitle.textContent = '';
+  elements.jobTitle.appendChild(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    const value = input.value.trim();
+    input.remove();
+    elements.jobTitle.textContent = original;
+    if (!save || !value || value === job.title) {
+      return;
+    }
+    try {
+      const result = await api(`/api/jobs/${encodeURIComponent(job.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: value })
+      });
+      if (result && result.job) {
+        Object.assign(job, result.job);
+        upsertJob(result.job);
+        elements.jobTitle.textContent = result.job.title || '未命名任务';
+        renderHistory();
+        showToast('标题已更新。', 'success');
+      }
+    } catch (error) {
+      showToast(error && error.message ? error.message : String(error), 'error');
+    }
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
 function createJob(payload, button) {
   withBusy(button, async () => {
     const result = await api('/api/jobs', {
@@ -670,7 +730,10 @@ function renderCurrentJob() {
     return;
   }
 
-  elements.jobTitle.textContent = job.title || '未命名任务';
+  // 正在重命名时不要覆盖：轮询每 2 秒跑一次，直接写 textContent 会把输入框冲掉
+  if (!elements.jobTitle.querySelector('input')) {
+    elements.jobTitle.textContent = job.title || '未命名任务';
+  }
   elements.jobCreated.textContent = `创建于 ${formatDate(job.created_at, true)}`;
   renderJobUsage(job.usage);
   elements.jobStatus.className = `status-badge ${statusClass(job.status)}`;

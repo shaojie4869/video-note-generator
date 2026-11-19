@@ -25,6 +25,9 @@ from .transcription import Transcriber, TranscriptionError
 
 LONG_TRANSCRIPT_THRESHOLD = 50000
 
+# 任务创建时还没有解析出真实标题，B 站任务先用这个占位。
+BILIBILI_PLACEHOLDER_TITLE = "B站课程"
+
 logger = logging.getLogger(__name__)
 
 
@@ -129,6 +132,23 @@ class JobManager:
         if event.is_set():
             raise JobCancelled()
 
+    def _refresh_bilibili_title(self, job_id: str, job: dict[str, Any]) -> None:
+        """把占位标题换成真实标题。
+
+        重新生成会复制原任务标题，如果原任务停在「B站课程」，就会一代代传下去，
+        历史列表攒多了完全没法区分，所以复用转写这条路必须自己解析一次。
+        """
+        try:
+            info = self.bilibili.info(job["source_ref"])
+        except (SourceError, OSError) as exc:
+            logger.warning("读取视频标题失败：%s", exc)
+            return
+        entries = info.get("entries") or []
+        index = int(job.get("entry_index") or 0)
+        title = entries[index]["title"] if index < len(entries) else info.get("title")
+        if title and title != job.get("title"):
+            self.db.update_job(job_id, title=title)
+
     async def _run_initial(self, job_id: str, event: threading.Event, confirm_long: bool) -> None:
         try:
             await asyncio.to_thread(self._prepare_transcript, job_id, event, confirm_long)
@@ -152,6 +172,11 @@ class JobManager:
             # 重新生成：转写已存在（复用自失败任务），直接进入总结流程。
             transcript = job["transcript"]
             self.db.update_job(job_id, status="running", stage="复用已完成的转写", progress=65)
+            if job["source_type"] == "bilibili" and (job.get("title") or "").strip() in {
+                "",
+                BILIBILI_PLACEHOLDER_TITLE,
+            }:
+                self._refresh_bilibili_title(job_id, job)
             if frames_enabled and not job.get("visual_notes"):
                 # 上次很可能就是失败在画面识别这一步：转写还在，画面笔记是空的。
                 # 这时必须重新拿到视频，否则重试会静默丢掉整段课件画面。
@@ -168,6 +193,11 @@ class JobManager:
                             job["source_ref"], job["entry_index"], job_id, want_video=True
                         )
                         video_path = prepared.media_path
+                        if prepared.title and (job.get("title") or "").strip() in {
+                            "",
+                            BILIBILI_PLACEHOLDER_TITLE,
+                        }:
+                            self.db.update_job(job_id, title=prepared.title)
                     except (SourceError, OSError) as exc:
                         logger.warning("重新下载视频失败，跳过画面信息：%s", exc)
                         video_path = None
