@@ -2208,7 +2208,7 @@ select.input {
   max-height: calc(100vh - 300px);
   min-height: 140px;
   margin: 0;
-  padding: 8px;
+  padding: 10px 12px 4px;
   overflow-y: auto;
   list-style: none;
   scrollbar-width: thin;
@@ -2216,53 +2216,80 @@ select.input {
 }
 
 .course-item {
+  position: relative;
   display: block;
   width: 100%;
-  margin-bottom: 4px;
-  padding: 10px 12px;
-  border: 1px solid transparent;
-  border-radius: 11px;
-  background: transparent;
+  margin-bottom: 8px;
+  padding: 11px 30px 11px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface);
   text-align: left;
   cursor: pointer;
-  transition: background 150ms ease, border-color 150ms ease;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background 150ms ease;
+}
+
+/* 选中态：左侧一条主色竖条，比整块底色更容易一眼定位。
+   注意别用负偏移，列表有 overflow-y 会把溢出部分裁掉。 */
+.course-item::before {
+  content: "";
+  position: absolute;
+  top: 11px;
+  bottom: 11px;
+  left: 1px;
+  width: 3px;
+  border-radius: 3px;
+  background: var(--primary);
+  opacity: 0;
+  transition: opacity 150ms ease;
 }
 
 .course-item:hover {
-  background: var(--surface-subtle);
+  border-color: var(--primary);
+  box-shadow: 0 4px 14px rgba(107, 76, 190, 0.1);
 }
 
 .course-item.is-active {
-  border-color: var(--border-strong);
+  border-color: var(--primary);
   background: var(--primary-soft);
+  box-shadow: 0 4px 14px rgba(107, 76, 190, 0.12);
+}
+
+.course-item.is-active::before {
+  opacity: 1;
 }
 
 .course-name {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   color: var(--text);
-  font-size: 13px;
-  line-height: 1.45;
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .course-item.is-active .course-name {
   color: #4c2f9e;
+  font-weight: 600;
 }
 
 .course-meta {
-  margin-top: 3px;
+  margin-top: 4px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
 }
 
 .course-unread {
-  flex: none;
+  position: absolute;
+  top: 13px;
+  right: 12px;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
 }
 
 .records-entry {
@@ -2272,17 +2299,28 @@ select.input {
   gap: 8px;
   width: calc(100% - 24px);
   margin: 4px 12px 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 11px;
+  padding: 11px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
   background: var(--surface);
   cursor: pointer;
-  transition: border-color 150ms ease, background 150ms ease;
+  transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
 }
 
 .records-entry:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-subtle);
+  border-color: var(--primary);
+  box-shadow: 0 4px 14px rgba(107, 76, 190, 0.1);
+}
+
+.records-entry.is-active {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  box-shadow: 0 4px 14px rgba(107, 76, 190, 0.12);
+}
+
+.records-entry.is-active .records-entry-title {
+  color: #4c2f9e;
+  font-weight: 600;
 }
 
 .records-entry-title {

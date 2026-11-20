@@ -688,10 +688,17 @@ function refreshLists() {
 
 function setView(view) {
   state.view = view;
+  // 首页和生成记录都不属于任何课程，清掉选中课程，
+  // 否则左栏会残留一门高亮的课程，看起来像还停在它上面。
+  if (view === 'home' || view === 'records') {
+    state.currentCourseId = '';
+  }
   elements.jobEmpty.hidden = view !== 'home';
   elements.courseView.hidden = view !== 'course';
   elements.recordsView.hidden = view !== 'records';
   elements.jobDetail.hidden = !(view === 'job' && state.selectedId && state.currentJob);
+  elements.recordsOpen.classList.toggle('is-active', view === 'records');
+  renderCourses();
 }
 
 async function refreshCourses({ initial = false } = {}) {
@@ -1319,8 +1326,12 @@ function statusClass(status) {
 function renderCurrentJob() {
   const job = state.currentJob;
   const hasJob = Boolean(state.selectedId && job);
-  elements.jobEmpty.hidden = hasJob;
-  elements.jobDetail.hidden = !hasJob;
+  // 主区域显示哪一块由 setView 决定；这里只更新内容。
+  // 否则轮询每 2 秒跑一次，会把笔记面板重新显示到课程页/生成记录页上。
+  if (state.view === 'home' || state.view === 'job') {
+    elements.jobEmpty.hidden = state.view !== 'home';
+    elements.jobDetail.hidden = !(state.view === 'job' && hasJob);
+  }
   if (!hasJob) {
     return;
   }
