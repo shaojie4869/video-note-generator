@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .config import DATA_DIR
+from .courses import auto_group, parse_sequence, sequence_sort_key
+
+MISC_COURSE_ID = "misc"
+MISC_COURSE_NAME = "杂项"
 
 
 def utc_now() -> str:
@@ -64,6 +68,48 @@ class Database:
                 connection.execute(
                     "ALTER TABLE jobs ADD COLUMN questions TEXT NOT NULL DEFAULT ''"
                 )
+            if "course_id" not in columns:
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN course_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "seq" not in columns:
+                # 章节号在写入时解析一次，排序就不用每次从标题里猜。
+                connection.execute("ALTER TABLE jobs ADD COLUMN seq TEXT NOT NULL DEFAULT ''")
+            if "finished_at" not in columns:
+                # 完成时间单独存：事后改名、移动会改 updated_at，用它算耗时会失真。
+                connection.execute(
+                    "ALTER TABLE jobs ADD COLUMN finished_at TEXT NOT NULL DEFAULT ''"
+                )
+            # 课程层：笔记归档到课程，「杂项」是固定的兜底课程。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS courses (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'course',
+                    source_key TEXT NOT NULL DEFAULT '',
+                    viewed_at TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_courses_source ON courses(source_key) "
+                "WHERE source_key != ''"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_jobs_course ON jobs(course_id)"
+            )
+            now = utc_now()
+            connection.execute(
+                """
+                INSERT INTO courses (id, name, kind, source_key, viewed_at, created_at, updated_at)
+                VALUES (?, ?, 'misc', '', '', ?, ?)
+                ON CONFLICT(id) DO NOTHING
+                """,
+                (MISC_COURSE_ID, MISC_COURSE_NAME, now, now),
+            )
             # 错题计数独立成表：题目重新生成时统计可以按索引重置，也不污染题目内容。
             connection.execute(
                 """
@@ -99,19 +145,38 @@ class Database:
             )
 
     def create_job(
-        self, source_type: str, source_ref: str, title: str, cache_key: str, entry_index: int
+        self,
+        source_type: str,
+        source_ref: str,
+        title: str,
+        cache_key: str,
+        entry_index: int,
+        course_id: str = "",
+        seq: str | None = None,
     ) -> dict[str, Any]:
         job_id = uuid.uuid4().hex
         now = utc_now()
+        sequence = parse_sequence(title) if seq is None else seq
         with self._lock, self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO jobs (
                     id, cache_key, created_at, updated_at, source_type, source_ref,
-                    entry_index, title, status, stage
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', '等待开始')
+                    entry_index, title, status, stage, course_id, seq
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', '等待开始', ?, ?)
                 """,
-                (job_id, cache_key, now, now, source_type, source_ref, entry_index, title),
+                (
+                    job_id,
+                    cache_key,
+                    now,
+                    now,
+                    source_type,
+                    source_ref,
+                    entry_index,
+                    title,
+                    course_id,
+                    sequence,
+                ),
             )
         return self.get_job(job_id)
 
@@ -126,8 +191,11 @@ class Database:
                 """
                 SELECT id, cache_key, created_at, updated_at, source_type, source_ref,
                        entry_index, title, status, stage, progress, provider, error,
+                       course_id, seq, finished_at,
                        length(transcript) AS transcript_chars,
-                       length(summary) AS summary_chars
+                       length(summary) AS summary_chars,
+                       (SELECT COALESCE(SUM(total_tokens), 0) FROM usage_log u
+                        WHERE u.job_id = jobs.id) AS tokens
                 FROM jobs ORDER BY created_at DESC LIMIT 200
                 """
             ).fetchall()
@@ -163,6 +231,9 @@ class Database:
         if not values:
             return
         values["updated_at"] = utc_now()
+        if values.get("status") in {"completed", "failed", "cancelled"}:
+            # 收尾状态出现时记一次完成时间，后续的编辑不影响它。
+            values.setdefault("finished_at", values["updated_at"])
         columns = ", ".join(f"{key} = ?" for key in values)
         parameters = [json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v for v in values.values()]
         parameters.append(job_id)
@@ -328,3 +399,147 @@ class Database:
             "by_purpose": [dict(row) for row in by_purpose],
             "by_model": [dict(row) for row in by_model],
         }
+
+    # ---------- 课程 ----------
+
+    def list_courses(self) -> list[dict[str, Any]]:
+        """课程列表：带笔记数与未读数，杂项永远排最后。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.id, c.name, c.kind, c.source_key, c.viewed_at,
+                       COUNT(DISTINCT j.cache_key) AS note_count,
+                       COALESCE(MAX(j.updated_at), '') AS last_at,
+                       COUNT(DISTINCT CASE
+                           WHEN c.viewed_at = '' OR j.updated_at > c.viewed_at
+                           THEN j.cache_key END) AS unread
+                FROM courses c
+                LEFT JOIN jobs j
+                    ON j.course_id = c.id AND j.status = 'completed' AND j.summary != ''
+                GROUP BY c.id
+                ORDER BY CASE WHEN c.kind = 'misc' THEN 1 ELSE 0 END,
+                         COALESCE(MAX(j.updated_at), c.created_at) DESC,
+                         c.name
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_course(self, course_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM courses WHERE id = ?", (course_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def create_course(
+        self, name: str, kind: str = "course", source_key: str = ""
+    ) -> dict[str, Any]:
+        name = (name or "").strip() or "未命名课程"
+        now = utc_now()
+        with self._lock, self._connect() as connection:
+            if source_key:
+                row = connection.execute(
+                    "SELECT * FROM courses WHERE source_key = ?", (source_key,)
+                ).fetchone()
+                if row:
+                    return dict(row)
+            course_id = uuid.uuid4().hex
+            connection.execute(
+                """
+                INSERT INTO courses (id, name, kind, source_key, viewed_at, created_at, updated_at)
+                VALUES (?, ?, ?, ?, '', ?, ?)
+                """,
+                (course_id, name, kind, source_key, now, now),
+            )
+        return self.get_course(course_id) or {}
+
+    def rename_course(self, course_id: str, name: str) -> bool:
+        name = (name or "").strip()
+        if not name:
+            return False
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE courses SET name = ?, updated_at = ? WHERE id = ?",
+                (name, utc_now(), course_id),
+            )
+            return cursor.rowcount > 0
+
+    def mark_course_viewed(self, course_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE courses SET viewed_at = ? WHERE id = ?", (utc_now(), course_id)
+            )
+
+    def move_job(self, job_id: str, course_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE jobs SET course_id = ?, updated_at = ? WHERE id = ?",
+                (course_id, utc_now(), job_id),
+            )
+            return cursor.rowcount > 0
+
+    def ensure_course_for_job(
+        self, source_type: str, source_ref: str, title: str, entry_index: int
+    ) -> str:
+        """按规则把任务归到课程；识别不出的统一进杂项。"""
+        kind, source_key, name = auto_group(source_type, source_ref, title, entry_index)
+        if kind != "course" or not source_key:
+            return MISC_COURSE_ID
+        return self.create_course(name, "course", source_key)["id"]
+
+    def course_notes(self, course_id: str) -> list[dict[str, Any]]:
+        """课程下的笔记索引：只返回已生成笔记的任务，同一来源只留最新一份。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, cache_key, title, seq, created_at, updated_at, status, error,
+                       provider,
+                       length(summary) AS summary_chars,
+                       questions,
+                       (SELECT COALESCE(SUM(q.wrong_count), 0)
+                        FROM question_stats q WHERE q.job_id = jobs.id) AS wrong_total
+                FROM jobs
+                WHERE course_id = ? AND status = 'completed' AND summary != ''
+                ORDER BY created_at DESC
+                """,
+                (course_id,),
+            ).fetchall()
+            course = connection.execute(
+                "SELECT kind FROM courses WHERE id = ?", (course_id,)
+            ).fetchone()
+
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            note = dict(row)
+            latest.setdefault(note["cache_key"], note)
+        notes = list(latest.values())
+        kind = course["kind"] if course else "course"
+        if kind == "misc":
+            # 杂项里的视频没有章节号，按时间倒序更符合直觉。
+            notes.sort(key=lambda item: item["created_at"], reverse=True)
+        else:
+            notes.sort(key=lambda item: (sequence_sort_key(item["seq"]), item["created_at"]))
+        return notes
+
+    def assign_missing_courses(self) -> int:
+        """给历史任务补课程归属与章节号，升级后第一次启动时执行。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, source_type, source_ref, title, entry_index
+                FROM jobs WHERE course_id = ''
+                """
+            ).fetchall()
+            empty_seq = connection.execute(
+                "SELECT id, title FROM jobs WHERE seq = ''"
+            ).fetchall()
+        for row in empty_seq:
+            sequence = parse_sequence(row["title"])
+            if sequence:
+                self.update_job(row["id"], seq=sequence)
+        for row in rows:
+            course_id = self.ensure_course_for_job(
+                row["source_type"], row["source_ref"], row["title"], row["entry_index"]
+            )
+            self.move_job(row["id"], course_id)
+        return len(rows)

@@ -16,15 +16,18 @@ from fastapi.staticfiles import StaticFiles
 
 from study_buddy import __version__
 from study_buddy.config import BASE_DIR, SettingsManager
-from study_buddy.db import Database
+from study_buddy.courses import auto_group, parse_sequence
+from study_buddy.db import MISC_COURSE_ID, Database
 from study_buddy.build_info import build_id
 from study_buddy.jobs import JobManager
 from study_buddy.schemas import (
     ApiSettings,
     BilibiliInfoRequest,
+    CourseCreate,
+    CourseRename,
     GeneralSettings,
     JobCreate,
-    JobRename,
+    JobUpdate,
 )
 from study_buddy.sources import BilibiliClient, SourceError, ffmpeg_executable, validate_local_video
 from study_buddy.summarizer import OpenAICompatibleProvider, SummaryService
@@ -47,6 +50,8 @@ _VISION_PROBE_TTL = 6 * 3600
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     database.mark_interrupted()
+    # 升级到课程层后，历史任务需要补一次归属；只做本地推断，不发网络请求。
+    await asyncio.to_thread(database.assign_missing_courses)
     yield
 
 
@@ -205,16 +210,74 @@ async def create_job(payload: JobCreate) -> dict:
 
 
 @app.patch("/api/jobs/{job_id}")
-def rename_job(job_id: str, payload: JobRename) -> dict:
-    """改标题。历史列表里同名任务多了以后，靠它区分。"""
+def update_job(job_id: str, payload: JobUpdate) -> dict:
+    """改标题或把笔记移到别的课程。"""
     job = database.get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="任务不存在。")
-    title = payload.title.strip()
-    if not title:
-        raise HTTPException(status_code=400, detail="标题不能为空。")
-    database.update_job(job_id, title=title)
+    if payload.title is not None:
+        title = payload.title.strip()
+        if not title:
+            raise HTTPException(status_code=400, detail="标题不能为空。")
+        # 改名时顺带重算章节号：用户可能把「未命名」补成「3-5 虚拟存储器」
+        sequence = parse_sequence(title)
+        database.update_job(job_id, title=title, seq=sequence or job.get("seq", ""))
+    if payload.course_id is not None:
+        course_id = payload.course_id.strip()
+        if not course_id:
+            raise HTTPException(status_code=400, detail="课程不能为空。")
+        if not database.get_course(course_id):
+            raise HTTPException(status_code=404, detail="课程不存在。")
+        database.move_job(job_id, course_id)
     return {"job": database.get_job(job_id)}
+
+
+@app.get("/api/courses")
+def list_courses() -> dict:
+    return {"courses": database.list_courses(), "misc_id": MISC_COURSE_ID}
+
+
+@app.post("/api/courses")
+def create_course(payload: CourseCreate) -> dict:
+    return {"course": database.create_course(payload.name)}
+
+
+@app.patch("/api/courses/{course_id}")
+def rename_course(course_id: str, payload: CourseRename) -> dict:
+    if not database.get_course(course_id):
+        raise HTTPException(status_code=404, detail="课程不存在。")
+    if not database.rename_course(course_id, payload.name):
+        raise HTTPException(status_code=400, detail="课程名不能为空。")
+    return {"course": database.get_course(course_id)}
+
+
+@app.get("/api/courses/suggest")
+def suggest_course(
+    source_type: str, source_ref: str, entry_index: int = 0, title: str = ""
+) -> dict:
+    """生成前的归属预览：命中已有课程就返回它，否则给出将新建的课程名。"""
+    kind, source_key, name = auto_group(source_type, source_ref, title, entry_index)
+    if kind != "course" or not source_key:
+        return {"kind": "misc", "name": "杂项", "course_id": MISC_COURSE_ID}
+    for course in database.list_courses():
+        if course["source_key"] == source_key:
+            return {"kind": "course", "name": course["name"], "course_id": course["id"]}
+    return {"kind": "course", "name": name, "course_id": ""}
+
+
+@app.get("/api/courses/{course_id}")
+def get_course(course_id: str) -> dict:
+    course = database.get_course(course_id)
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在。")
+    notes = database.course_notes(course_id)
+    # 打开课程即视为已读，左栏未读点随之消失。
+    database.mark_course_viewed(course_id)
+    return {
+        "course": course,
+        "notes": notes,
+        "misc_id": MISC_COURSE_ID,
+    }
 
 
 @app.get("/api/jobs")

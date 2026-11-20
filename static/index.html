@@ -84,40 +84,89 @@
           </div>
 
           <div class="source-submit">
+            <label class="field-label" for="course-select">归入课程</label>
+            <div class="inline-form">
+              <select id="course-select" class="input"></select>
+              <button id="course-new" class="button button-secondary" type="button">新建</button>
+            </div>
+            <p id="course-hint" class="field-help">自动识别：本地按所在目录、B 站按分P；识别不出会放进「杂项」，生成后仍可调整。</p>
             <p id="source-hint">请先选择一个本地视频文件。</p>
             <button id="start-button" class="button button-primary button-large" type="button" disabled>开始生成总结</button>
-            <p class="history-note">历史任务保存在本地，关闭页面后仍可查看。</p>
+            <p class="history-note">笔记按课程归档，关闭页面后仍可查看。</p>
           </div>
           <img class="panel-character" src="/static/thinking.png" alt="" aria-hidden="true">
         </div>
       </section>
 
         <div class="workspace">
-      <aside class="card history-card" aria-labelledby="history-heading">
+      <aside class="card history-card" aria-labelledby="course-heading">
         <div class="card-header">
           <div class="history-title-row">
-            <h2 id="history-heading">历史任务</h2>
-            <span id="history-count" class="count-badge">0</span>
-            <span id="usage-badge" class="usage-badge" hidden></span>
+            <h2 id="course-heading">课程</h2>
+            <span id="course-count" class="count-badge">0</span>
           </div>
-          <span id="history-refresh-status" class="refresh-status" role="status">正在读取</span>
+          <span id="course-refresh-status" class="refresh-status" role="status">正在读取</span>
         </div>
-        <div id="history-empty" class="empty-state compact" hidden>
+        <div id="course-empty" class="empty-state compact" hidden>
           <div class="empty-illustration" aria-hidden="true"></div>
-          <h3>暂无历史任务</h3>
-          <p>选择视频并开始生成后，任务会出现在这里。</p>
+          <h3>还没有课程</h3>
+          <p>生成第一份笔记后，会自动按课程归档。</p>
         </div>
-        <ul id="history-list" class="history-list" aria-label="历史任务列表"></ul>
+        <ul id="course-list" class="course-list" aria-label="课程列表"></ul>
+        <button id="records-open" class="records-entry" type="button">
+          <span class="records-entry-title">生成记录</span>
+          <span id="records-entry-meta" class="records-entry-meta">按时间查看</span>
+        </button>
       </aside>
 
       <section class="card detail-card" aria-labelledby="detail-heading">
         <div id="job-empty" class="empty-state">
           <div class="empty-illustration" aria-hidden="true"></div>
-          <h2 id="detail-heading">还没有选择任务</h2>
-          <p>从上方创建总结，或在左侧查看已有任务。</p>
+          <h2 id="detail-heading">从左侧选一门课，或在上方新建任务</h2>
+          <p>生成的笔记会自动归档到课程；识别不出课程的视频会放进「杂项」。</p>
         </div>
 
+        <section id="course-view" class="course-view" hidden>
+          <div class="course-head">
+            <div class="course-head-main">
+              <p class="eyebrow">课程笔记</p>
+              <div class="course-title-row">
+                <h2 id="course-title"></h2>
+                <button id="course-rename" class="job-title-edit" type="button" title="重命名课程" aria-label="重命名课程">✎</button>
+              </div>
+              <p id="course-meta" class="muted"></p>
+            </div>
+          </div>
+          <div id="course-notes" class="course-notes"></div>
+          <div id="course-notes-empty" class="empty-state compact" hidden>
+            <h3>这门课还没有笔记</h3>
+            <p>生成完成后会自动归档到这里。</p>
+          </div>
+        </section>
+
+        <section id="records-view" class="records-view" hidden>
+          <div class="course-head">
+            <div class="course-head-main">
+              <p class="eyebrow">运行记录</p>
+              <h2>生成记录</h2>
+              <p id="records-meta" class="muted"></p>
+            </div>
+            <div class="result-actions">
+              <span id="usage-badge" class="usage-badge" hidden></span>
+            </div>
+          </div>
+          <div id="records-list" class="records-list"></div>
+        </section>
+
         <div id="job-detail" hidden>
+
+          <div class="job-back-row">
+            <button id="job-back" class="button button-secondary button-small" type="button">← 返回课程</button>
+            <div class="job-pager">
+              <button id="prev-note" class="button button-secondary button-small" type="button">上一节</button>
+              <button id="next-note" class="button button-secondary button-small" type="button">下一节</button>
+            </div>
+          </div>
           <div class="job-header">
             <div class="job-heading-wrap">
               <div class="job-badges">
@@ -392,6 +441,8 @@
     <button class="text-menu-item" type="button" role="menuitem" data-action="select-all">全选本段</button>
     <button class="text-menu-item" type="button" role="menuitem" data-action="copy-all">复制整篇笔记</button>
   </div>
+
+  <div id="card-menu" class="text-menu card-menu" role="menu" aria-label="笔记操作" hidden></div>
 
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
 </body>

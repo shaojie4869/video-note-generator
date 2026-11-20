@@ -2202,3 +2202,272 @@ select.input {
   color: #6f6889;
   font-size: 12px;
 }
+
+/* ---------- 课程导航 ---------- */
+.course-list {
+  max-height: calc(100vh - 300px);
+  min-height: 140px;
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+.course-item {
+  display: block;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.course-item:hover {
+  background: var(--surface-subtle);
+}
+
+.course-item.is-active {
+  border-color: var(--border-strong);
+  background: var(--primary-soft);
+}
+
+.course-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.course-item.is-active .course-name {
+  color: #4c2f9e;
+}
+
+.course-meta {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.course-unread {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+
+.records-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: calc(100% - 24px);
+  margin: 4px 12px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  cursor: pointer;
+  transition: border-color 150ms ease, background 150ms ease;
+}
+
+.records-entry:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-subtle);
+}
+
+.records-entry-title {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.records-entry-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* ---------- 课程索引 ---------- */
+.course-view,
+.records-view {
+  display: block;
+}
+
+.course-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.course-head-main {
+  min-width: 0;
+}
+
+.course-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 6px 0 4px;
+}
+
+.course-title-row h2 {
+  margin: 0;
+  font-size: 20px;
+  overflow-wrap: anywhere;
+}
+
+.course-notes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.course-chapter {
+  grid-column: 1 / -1;
+  margin: 10px 0 -2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.note-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 14px 13px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.note-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow);
+  transform: translateY(-1px);
+}
+
+.note-seq {
+  color: var(--primary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.note-title {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.note-badge {
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.note-more {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 150ms ease, background 150ms ease;
+}
+
+.note-card:hover .note-more,
+.note-more:focus-visible {
+  opacity: 1;
+}
+
+.note-more:hover {
+  border-color: var(--border);
+  background: var(--surface-subtle);
+}
+
+.note-title-input {
+  width: 100%;
+  font-size: 13px;
+}
+
+/* ---------- 生成记录 ---------- */
+.records-list {
+  margin-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.records-row {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr) 96px 104px;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.records-row.is-head {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.records-row.is-failed .records-title {
+  color: var(--danger);
+}
+
+.records-title {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.records-num {
+  color: var(--muted);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 笔记页返回 ---------- */
+.job-back-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.job-pager {
+  display: flex;
+  gap: 6px;
+}
+
+.card-menu {
+  min-width: 172px;
+  max-height: 330px;
+  overflow-y: auto;
+}
+
+.card-menu-sep {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--border);
+}

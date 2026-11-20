@@ -23,6 +23,16 @@ const state = {
   local: { path: '', title: '' },
   bilibili: { info: null, infoUrl: '', entryIndex: 0 },
   jobs: [],
+  courses: [],
+  // 右侧当前显示哪个视图：home / course / job / records
+  view: 'home',
+  currentCourseId: '',
+  currentCourse: null,
+  courseNotes: [],
+  miscId: 'misc',
+  courseSelectSignature: '',
+  coursesRefreshing: false,
+  noteMenuJobId: '',
   selectedId: null,
   currentJob: null,
   config: null,
@@ -62,7 +72,11 @@ function init() {
     'tab-local', 'tab-bilibili', 'panel-local', 'panel-bilibili',
     'browse-button', 'local-selection', 'local-title', 'local-path',
     'bilibili-url', 'bilibili-info-button', 'bilibili-result', 'bilibili-title', 'bilibili-entry',
-    'source-hint', 'start-button', 'history-count', 'usage-badge', 'history-refresh-status', 'history-empty', 'history-list',
+    'source-hint', 'start-button', 'course-count', 'course-refresh-status', 'course-empty', 'course-list',
+    'course-select', 'course-new', 'course-hint', 'records-open', 'records-entry-meta',
+    'course-view', 'course-title', 'course-meta', 'course-rename', 'course-notes', 'course-notes-empty',
+    'records-view', 'records-meta', 'records-list', 'usage-badge', 'card-menu',
+    'job-back', 'prev-note', 'next-note',
     'job-empty', 'job-detail', 'job-title', 'job-status', 'job-provider', 'job-created', 'job-usage', 'job-stage',
     'job-progress-section', 'job-progress', 'job-progress-text', 'cancel-job', 'confirmation-box', 'transcript-count', 'confirm-job',
     'error-box', 'job-error', 'result-section', 'copy-summary', 'export-summary', 'summary-content',
@@ -81,11 +95,14 @@ function init() {
 
   bindEvents();
   switchSource('local');
-  renderHistory();
-  renderCurrentJob();
+  setView('home');
+  refreshCourses({ initial: true });
   refreshJobs({ initial: true });
   checkBackendFeatures();
-  window.setInterval(() => refreshJobs(), 2000);
+  window.setInterval(() => {
+    refreshJobs();
+    refreshCourses();
+  }, 2000);
 }
 
 function toCamelCase(value) {
@@ -135,8 +152,15 @@ function bindEvents() {
   elements.bilibiliEntry.addEventListener('change', () => {
     state.bilibili.entryIndex = Number(elements.bilibiliEntry.value);
     updateStartState();
+    suggestCourse();
   });
   elements.startButton.addEventListener('click', startNewJob);
+  elements.courseNew.addEventListener('click', beginNewCourse);
+  elements.recordsOpen.addEventListener('click', openRecords);
+  elements.courseRename.addEventListener('click', startRenameCourse);
+  elements.jobBack.addEventListener('click', goBackFromJob);
+  elements.prevNote.addEventListener('click', () => stepNote(-1));
+  elements.nextNote.addEventListener('click', () => stepNote(1));
 
   elements.cancelJob.addEventListener('click', cancelSelectedJob);
   elements.confirmJob.addEventListener('click', confirmSelectedJob);
@@ -292,6 +316,7 @@ function renderLocalSelection() {
   elements.localPath.textContent = state.local.path;
   elements.localPath.title = state.local.path;
   updateStartState();
+  suggestCourse();
 }
 
 function handleBilibiliUrlChange() {
@@ -354,6 +379,7 @@ function renderBilibiliInfo() {
   }
   elements.bilibiliEntry.value = String(state.bilibili.entryIndex);
   updateStartState();
+  suggestCourse();
 }
 
 function updateStartState() {
@@ -397,7 +423,8 @@ function startNewJob() {
       title: state.local.title,
       entry_index: 0,
       force: false,
-      confirm_long: false
+      confirm_long: false,
+      course_id: elements.courseSelect.value || ''
     };
   } else {
     if (!state.bilibili.info || elements.bilibiliUrl.value.trim() !== state.bilibili.infoUrl) {
@@ -414,7 +441,8 @@ function startNewJob() {
       title: selected && selected.title ? selected.title : state.bilibili.info.title,
       entry_index: state.bilibili.entryIndex,
       force: false,
-      confirm_long: false
+      confirm_long: false,
+      course_id: elements.courseSelect.value || ''
     };
   }
   createJob(payload, elements.startButton);
@@ -474,7 +502,11 @@ function startRenameJob() {
         Object.assign(job, result.job);
         upsertJob(result.job);
         elements.jobTitle.textContent = result.job.title || '未命名任务';
-        renderHistory();
+        const note = state.courseNotes.find((item) => item.id === job.id);
+        if (note) {
+          note.title = result.job.title;
+        }
+        refreshLists();
         showToast('标题已更新。', 'success');
       }
     } catch (error) {
@@ -506,9 +538,14 @@ function createJob(payload, button) {
     state.selectedId = result.job.id;
     state.currentJob = result.job;
     state.detailRequest += 1;
+    if (result.job.course_id) {
+      state.currentCourseId = result.job.course_id;
+    }
     upsertJob(result.job);
-    renderHistory();
+    updatePager();
+    setView('job');
     renderCurrentJob();
+    refreshLists();
     if (result.reused) {
       showToast('已读取历史总结，没有重复调用模型', 'success');
     } else {
@@ -533,49 +570,77 @@ async function refreshJobs({ initial = false } = {}) {
   }
   state.refreshing = true;
   try {
+    const previous = state.jobs;
     const result = await api('/api/jobs');
     state.jobs = Array.isArray(result.jobs) ? result.jobs : [];
-    if (!state.selectedId && state.jobs.length) {
-      state.selectedId = state.jobs[0].id;
+    elements.recordsEntryMeta.textContent = state.jobs.length
+      ? `共 ${state.jobs.length} 条`
+      : '按时间查看';
+    if (state.view === 'records') {
+      renderRecords();
     }
-    if (state.selectedId && !state.jobs.some((job) => job.id === state.selectedId)) {
-      state.selectedId = null;
-      state.currentJob = null;
-      state.detailRequest += 1;
-    }
-    renderHistory();
+    notifyCompleted(previous, state.jobs);
 
     if (state.selectedId) {
       const listed = state.jobs.find((job) => job.id === state.selectedId);
-      const current = state.currentJob;
-      const needsDetail = Boolean(
-        initial || !current || current.id !== state.selectedId ||
-        current.transcript === undefined || current.summary === undefined ||
-        (listed && (ACTIVE_STATUSES.has(listed.status) || ACTIVE_STATUSES.has(current.status))) ||
-        (listed && listed.status !== current.status)
-      );
-      if (needsDetail) {
-        await loadJob(state.selectedId, { silent: !initial });
+      if (!listed) {
+        state.selectedId = null;
+        state.currentJob = null;
+        state.detailRequest += 1;
+        if (state.view === 'job') {
+          goBackFromJob();
+        }
       } else {
-        state.currentJob = { ...current, ...listed };
-        renderCurrentJob();
+        const current = state.currentJob;
+        const needsDetail = Boolean(
+          initial || !current || current.id !== state.selectedId ||
+          current.transcript === undefined || current.summary === undefined ||
+          ACTIVE_STATUSES.has(listed.status) || ACTIVE_STATUSES.has(current.status) ||
+          listed.status !== current.status
+        );
+        if (needsDetail) {
+          await loadJob(state.selectedId, { silent: !initial });
+        } else {
+          state.currentJob = { ...current, ...listed };
+          renderCurrentJob();
+        }
       }
-    } else {
-      renderCurrentJob();
     }
-
-    elements.historyRefreshStatus.textContent = '每 2 秒自动刷新';
-    elements.historyRefreshStatus.classList.remove('is-error');
     state.pollErrorNotified = false;
   } catch (error) {
-    elements.historyRefreshStatus.textContent = '更新失败，将自动重试';
-    elements.historyRefreshStatus.classList.add('is-error');
     if (initial || !state.pollErrorNotified) {
       showToast(error.message, 'error');
       state.pollErrorNotified = true;
     }
   } finally {
     state.refreshing = false;
+  }
+}
+
+/**
+ * 任务完成时告知归档位置。
+ * 生成要几分钟，人通常不会盯着进度条，所以提示必须带「去哪看」。
+ */
+function notifyCompleted(previous, jobs) {
+  if (!previous || !previous.length) {
+    return;
+  }
+  const finished = jobs.find((job) => {
+    if (job.status !== 'completed') {
+      return false;
+    }
+    const before = previous.find((item) => item.id === job.id);
+    return before && before.status !== 'completed';
+  });
+  if (!finished) {
+    return;
+  }
+  const course = state.courses.find((item) => item.id === finished.course_id);
+  const where = course ? `「${course.name}」` : '「杂项」';
+  showToast(`已生成：${finished.title || '未命名笔记'}，归档到${where}。`, 'success');
+  refreshCourses();
+  if (state.view === 'course' && state.currentCourseId === finished.course_id) {
+    openCourse(state.currentCourseId);
   }
 }
 
@@ -601,113 +666,643 @@ function selectJob(id) {
   if (!id) {
     return;
   }
-  state.selectedId = id;
   const listed = state.jobs.find((job) => job.id === id);
-  if (!state.currentJob || state.currentJob.id !== id) {
-    state.currentJob = listed || null;
+  if (listed && listed.course_id) {
+    state.currentCourseId = listed.course_id;
   }
-  renderHistory();
-  renderCurrentJob();
-  loadJob(id);
+  openNote(id);
 }
 
-function historyGroupKey(job) {
-  if (job.cache_key) {
-    return String(job.cache_key);
+// 任务状态变化后统一刷新：课程计数、生成记录、以及当前打开的课程索引
+function refreshLists() {
+  refreshCourses();
+  if (state.view === 'records') {
+    renderRecords();
   }
-  return `${job.source_type || ''}|${job.source_ref || ''}|${job.entry_index || 0}`;
+  if (state.view === 'course' && state.currentCourseId) {
+    openCourse(state.currentCourseId);
+  }
 }
 
-// 同一视频多次尝试只留最新一条；被选中的旧记录仍然展示，避免选中项凭空消失。
-function buildHistoryEntries() {
-  const groups = new Map();
-  state.jobs.forEach((job) => {
-    const key = historyGroupKey(job);
-    if (!groups.has(key)) {
-      groups.set(key, []);
+/* ---------- 课程导航 ---------- */
+
+function setView(view) {
+  state.view = view;
+  elements.jobEmpty.hidden = view !== 'home';
+  elements.courseView.hidden = view !== 'course';
+  elements.recordsView.hidden = view !== 'records';
+  elements.jobDetail.hidden = !(view === 'job' && state.selectedId && state.currentJob);
+}
+
+async function refreshCourses({ initial = false } = {}) {
+  if (state.coursesRefreshing) {
+    return;
+  }
+  state.coursesRefreshing = true;
+  try {
+    const result = await api('/api/courses');
+    state.courses = Array.isArray(result.courses) ? result.courses : [];
+    state.miscId = result.misc_id || 'misc';
+    renderCourses();
+    renderCourseSelect();
+    elements.courseRefreshStatus.textContent = '每 2 秒自动刷新';
+    elements.courseRefreshStatus.classList.remove('is-error');
+  } catch (error) {
+    elements.courseRefreshStatus.textContent = '更新失败，将自动重试';
+    elements.courseRefreshStatus.classList.add('is-error');
+    if (initial) {
+      showToast(error.message, 'error');
     }
-    groups.get(key).push(job);
-  });
-  const entries = [];
-  groups.forEach((list) => {
-    list.forEach((job, index) => {
-      if (index === 0 || job.id === state.selectedId) {
-        entries.push({ job, attempts: list.length });
-      }
-    });
-  });
-  return entries;
+  } finally {
+    state.coursesRefreshing = false;
+  }
 }
 
-function renderHistory() {
-  loadUsageSummary();
-  const entries = buildHistoryEntries();
-  elements.historyCount.textContent = String(entries.length);
-  elements.historyEmpty.hidden = entries.length > 0;
-  elements.historyList.hidden = entries.length === 0;
+function renderCourses() {
+  const courses = state.courses;
+  elements.courseCount.textContent = String(courses.length);
+  elements.courseEmpty.hidden = courses.length > 0;
+  elements.courseList.hidden = courses.length === 0;
   const fragment = document.createDocumentFragment();
-
-  entries.forEach(({ job, attempts }) => {
+  courses.forEach((course) => {
     const item = document.createElement('li');
-    item.className = 'history-item';
-    item.classList.toggle('is-selected', job.id === state.selectedId);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'course-item';
+    button.classList.toggle('is-active', course.id === state.currentCourseId);
+    button.setAttribute('aria-label', `查看课程：${course.name}`);
 
-    const select = document.createElement('button');
-    select.type = 'button';
-    select.className = 'history-select';
-    select.setAttribute('aria-label', `查看任务：${job.title || '未命名任务'}`);
-    if (job.id === state.selectedId) {
-      select.setAttribute('aria-current', 'true');
+    const name = document.createElement('div');
+    name.className = 'course-name';
+    const label = document.createElement('span');
+    label.textContent = course.name;
+    name.appendChild(label);
+    if (course.unread > 0) {
+      const dot = document.createElement('span');
+      dot.className = 'course-unread';
+      dot.title = `${course.unread} 条新笔记`;
+      name.appendChild(dot);
     }
-
-    const title = document.createElement('div');
-    title.className = 'history-item-title';
-    title.textContent = job.title || '未命名任务';
-    title.title = job.title || '未命名任务';
-    select.appendChild(title);
 
     const meta = document.createElement('div');
-    meta.className = 'history-item-meta';
-    const metaLeft = document.createElement('span');
-    metaLeft.className = 'history-meta-left';
-    const date = document.createElement('span');
-    date.className = 'history-date';
-    date.textContent = formatDate(job.created_at);
-    metaLeft.appendChild(date);
-    if (attempts > 1) {
-      const attemptsBadge = document.createElement('span');
-      attemptsBadge.className = 'history-attempts';
-      attemptsBadge.textContent = `共 ${attempts} 次`;
-      attemptsBadge.title = `这条视频共处理过 ${attempts} 次，列表中只保留最近一次`;
-      metaLeft.appendChild(attemptsBadge);
-    }
-    meta.appendChild(metaLeft);
-    meta.appendChild(createStatusBadge(job.status));
-    select.appendChild(meta);
+    meta.className = 'course-meta';
+    meta.textContent = course.note_count > 0 ? `${course.note_count} 条笔记` : '暂无笔记';
 
-    if (ACTIVE_STATUSES.has(job.status)) {
-      const track = document.createElement('div');
-      track.className = 'history-mini-progress';
-      const bar = document.createElement('span');
-      bar.style.width = `${normalizeProgress(job.progress)}%`;
-      track.appendChild(bar);
-      select.appendChild(track);
-    }
-
-    const remove = document.createElement('button');
-    remove.type = 'button';
-    remove.className = 'history-delete';
-    remove.textContent = '删除';
-    remove.setAttribute('aria-label', `删除历史任务：${job.title || '未命名任务'}`);
-    setButtonDisabled(remove, ACTIVE_STATUSES.has(job.status));
-    remove.addEventListener('click', () => deleteJob(job.id, remove));
-
-    item.appendChild(select);
-    item.appendChild(remove);
-    select.addEventListener('click', () => selectJob(job.id));
+    button.append(name, meta);
+    button.addEventListener('click', () => openCourse(course.id));
+    item.appendChild(button);
     fragment.appendChild(item);
   });
-  elements.historyList.replaceChildren(fragment);
+  elements.courseList.replaceChildren(fragment);
+  elements.recordsEntryMeta.textContent = state.jobs.length
+    ? `共 ${state.jobs.length} 条`
+    : '按时间查看';
+}
+
+async function openCourse(courseId) {
+  state.currentCourseId = courseId;
+  state.selectedId = null;
+  state.currentJob = null;
+  state.currentModule = '';
+  renderCourses();
+  setView('course');
+  elements.courseTitle.textContent = '读取中…';
+  elements.courseMeta.textContent = '';
+  elements.courseNotes.replaceChildren();
+  elements.courseNotesEmpty.hidden = true;
+  try {
+    const result = await api(`/api/courses/${encodeURIComponent(courseId)}`);
+    state.currentCourse = result.course;
+    state.courseNotes = Array.isArray(result.notes) ? result.notes : [];
+    renderCourseView();
+    refreshCourses();
+    loadUsageSummary();
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+function renderCourseView() {
+  const course = state.currentCourse;
+  if (!course) {
+    return;
+  }
+  elements.courseTitle.textContent = course.name;
+  const total = state.courseNotes.length;
+  const order = course.kind === 'misc' ? '按时间排序' : '按章节排序';
+  elements.courseMeta.textContent = total ? `${total} 条笔记 · ${order}` : '暂无笔记';
+  elements.courseNotesEmpty.hidden = total > 0;
+
+  const fragment = document.createDocumentFragment();
+  let lastChapter = null;
+  state.courseNotes.forEach((note) => {
+    const chapter = note.seq ? String(note.seq).split('-')[0] : '';
+    if (chapter && chapter !== lastChapter) {
+      const heading = document.createElement('p');
+      heading.className = 'course-chapter';
+      heading.textContent = `第 ${chapter} 章`;
+      fragment.appendChild(heading);
+      lastChapter = chapter;
+    }
+    fragment.appendChild(noteCard(note));
+  });
+  elements.courseNotes.replaceChildren(fragment);
+}
+
+// 卡片标题去掉重复的章节号：`1-2 操作系统的发展历程` + `1-2` 会读成两遍
+function noteTitle(note) {
+  const title = note.title || '未命名笔记';
+  if (!note.seq) {
+    return title;
+  }
+  const [major, minor] = String(note.seq).split('-');
+  const pattern = new RegExp(`^\\s*p?${major}\\s*[-–—．.]\\s*${minor}\\s*`);
+  return title.replace(pattern, '').trim() || title;
+}
+
+function noteCard(note) {
+  const card = document.createElement('div');
+  card.className = 'note-card';
+  card.dataset.jobId = note.id;
+  card.setAttribute('role', 'button');
+  card.setAttribute('tabindex', '0');
+  card.setAttribute('aria-label', `打开笔记：${noteTitle(note)}`);
+  card.addEventListener('click', (event) => {
+    if (event.target.closest('.note-more')) {
+      return;
+    }
+    openNote(note.id);
+  });
+  card.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openNote(note.id);
+    }
+  });
+
+  const seq = document.createElement('span');
+  seq.className = 'note-seq';
+  seq.textContent = note.seq || '';
+
+  const title = document.createElement('span');
+  title.className = 'note-title';
+  title.textContent = noteTitle(note);
+
+  const more = document.createElement('button');
+  more.type = 'button';
+  more.className = 'note-more';
+  more.textContent = '⋯';
+  more.title = '重命名 / 移到其他课程';
+  more.setAttribute('aria-label', '更多操作');
+  more.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openNoteMenu(note.id, more);
+  });
+
+  card.append(seq, title);
+  if (note.wrong_total > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'note-badge';
+    badge.textContent = `错题 ×${note.wrong_total}`;
+    card.appendChild(badge);
+  }
+  card.appendChild(more);
+  return card;
+}
+
+function openNote(jobId) {
+  state.selectedId = jobId;
+  state.currentModule = '';
+  state.renderedSummaryJob = '';
+  state.renderedSummary = '';
+  updatePager();
+  setView('job');
+  renderCurrentJob();
+  loadJob(jobId);
+}
+
+function updatePager() {
+  const index = state.courseNotes.findIndex((note) => note.id === state.selectedId);
+  const inCourse = index >= 0;
+  elements.prevNote.disabled = !inCourse || index <= 0;
+  elements.nextNote.disabled = !inCourse || index >= state.courseNotes.length - 1;
+  elements.jobBack.hidden = !state.currentCourseId;
+}
+
+function goBackFromJob() {
+  state.selectedId = null;
+  state.currentJob = null;
+  if (state.currentCourseId) {
+    openCourse(state.currentCourseId);
+  } else {
+    setView('home');
+    renderCourses();
+  }
+}
+
+function stepNote(delta) {
+  const index = state.courseNotes.findIndex((note) => note.id === state.selectedId);
+  const target = state.courseNotes[index + delta];
+  if (target) {
+    openNote(target.id);
+  }
+}
+
+/* ---------- 生成记录 ---------- */
+
+function openRecords() {
+  setView('records');
+  renderRecords();
+  loadUsageSummary(true);
+}
+
+function renderRecords() {
+  const jobs = state.jobs;
+  elements.recordsMeta.textContent = jobs.length
+    ? `共 ${jobs.length} 次生成，按时间倒序`
+    : '还没有生成记录';
+  const fragment = document.createDocumentFragment();
+  if (jobs.length) {
+    const head = document.createElement('div');
+    head.className = 'records-row is-head';
+    ['时间', '标题', '耗时', '用量 / 状态'].forEach((text) => {
+      const cell = document.createElement('span');
+      cell.textContent = text;
+      head.appendChild(cell);
+    });
+    fragment.appendChild(head);
+  }
+  jobs.forEach((job) => {
+    const row = document.createElement('div');
+    row.className = 'records-row';
+    row.classList.toggle('is-failed', job.status === 'failed');
+
+    const time = document.createElement('span');
+    time.className = 'records-num';
+    time.style.textAlign = 'left';
+    time.textContent = formatDate(job.created_at, true);
+
+    const title = document.createElement('span');
+    title.className = 'records-title';
+    title.textContent = job.title || '未命名任务';
+
+    const cost = document.createElement('span');
+    cost.className = 'records-num';
+    cost.textContent = jobDuration(job) || '—';
+
+    const tail = document.createElement('span');
+    tail.className = 'records-num';
+    tail.textContent = `${formatTokens(job.tokens || 0)} · ${STATUS_LABELS[job.status] || job.status}`;
+
+    row.append(time, title, cost, tail);
+    if (job.summary_chars > 0) {
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => openRecord(job));
+    }
+    fragment.appendChild(row);
+  });
+  elements.recordsList.replaceChildren(fragment);
+}
+
+function jobDuration(job) {
+  const start = Date.parse(job.created_at || '');
+  const end = Date.parse(job.finished_at || job.updated_at || '');
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return '';
+  }
+  return formatDuration((end - start) / 1000);
+}
+
+async function openRecord(job) {
+  if (job.course_id && job.course_id !== state.currentCourseId) {
+    await openCourse(job.course_id);
+  }
+  openNote(job.id);
+}
+
+/* ---------- 笔记卡片菜单 ---------- */
+
+function closeNoteMenu() {
+  elements.cardMenu.hidden = true;
+  state.noteMenuJobId = '';
+}
+
+function menuItem(text, action) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'text-menu-item';
+  button.textContent = text;
+  button.addEventListener('click', () => {
+    closeNoteMenu();
+    action();
+  });
+  return button;
+}
+
+function openNoteMenu(jobId, anchor) {
+  state.noteMenuJobId = jobId;
+  const menu = elements.cardMenu;
+  const fragment = document.createDocumentFragment();
+  fragment.appendChild(menuItem('重命名标题', () => startRenameNote(jobId)));
+
+  const label = document.createElement('div');
+  label.className = 'card-menu-sep';
+  fragment.appendChild(label);
+  const hint = document.createElement('div');
+  hint.className = 'card-menu-hint';
+  hint.textContent = '移到课程';
+  fragment.appendChild(hint);
+
+  state.courses.forEach((course) => {
+    if (course.id === state.currentCourseId) {
+      return;
+    }
+    fragment.appendChild(menuItem(course.name, () => moveNote(jobId, course.id, course.name)));
+  });
+
+  menu.replaceChildren(fragment);
+  menu.hidden = false;
+  const rect = anchor.getBoundingClientRect();
+  const width = menu.offsetWidth;
+  const height = menu.offsetHeight;
+  const left = Math.min(rect.right - width + 4, window.innerWidth - width - 12);
+  const top = rect.bottom + 6 + height > window.innerHeight - 12
+    ? Math.max(12, rect.top - height - 6)
+    : rect.bottom + 6;
+  menu.style.left = `${Math.max(12, left)}px`;
+  menu.style.top = `${top}px`;
+}
+
+async function moveNote(jobId, courseId, courseName) {
+  try {
+    await api(`/api/jobs/${encodeURIComponent(jobId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ course_id: courseId })
+    });
+    showToast(`已移到「${courseName}」。`, 'success');
+    await refreshCourses();
+    if (state.currentCourseId) {
+      openCourse(state.currentCourseId);
+    }
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
+}
+
+function startRenameNote(jobId) {
+  const card = elements.courseNotes.querySelector(`[data-job-id="${jobId}"]`);
+  const titleNode = card && card.querySelector('.note-title');
+  if (!titleNode || titleNode.querySelector('input')) {
+    return;
+  }
+  const note = state.courseNotes.find((item) => item.id === jobId);
+  const original = titleNode.textContent;
+  const input = document.createElement('input');
+  input.className = 'input note-title-input';
+  input.type = 'text';
+  input.maxLength = 120;
+  input.value = note ? note.title : original;
+  titleNode.textContent = '';
+  titleNode.appendChild(input);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    const value = input.value.trim();
+    input.remove();
+    titleNode.textContent = original;
+    if (!save || !value || !note || value === note.title) {
+      return;
+    }
+    try {
+      const result = await api(`/api/jobs/${encodeURIComponent(jobId)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: value })
+      });
+      if (result.job) {
+        note.title = result.job.title;
+        note.seq = result.job.seq || note.seq;
+        renderCourseView();
+        showToast('标题已更新。', 'success');
+      }
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+/* ---------- 课程重命名 / 课前选择 ---------- */
+
+function startRenameCourse() {
+  const course = state.currentCourse;
+  const row = elements.courseTitle.parentElement;
+  if (!course || row.querySelector('input')) {
+    return;
+  }
+  const original = course.name;
+  const input = document.createElement('input');
+  input.className = 'input note-title-input';
+  input.type = 'text';
+  input.maxLength = 120;
+  input.value = original;
+  elements.courseTitle.hidden = true;
+  row.insertBefore(input, elements.courseTitle);
+  input.focus();
+  input.select();
+
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) {
+      return;
+    }
+    settled = true;
+    const value = input.value.trim();
+    input.remove();
+    elements.courseTitle.hidden = false;
+    if (!save || !value || value === original) {
+      return;
+    }
+    try {
+      const result = await api(`/api/courses/${encodeURIComponent(course.id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ name: value })
+      });
+      if (result.course) {
+        state.currentCourse = { ...course, ...result.course };
+        elements.courseTitle.textContent = result.course.name;
+        await refreshCourses();
+        showToast('课程已重命名。', 'success');
+      }
+    } catch (error) {
+      showToast(error.message, 'error');
+    }
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+function renderCourseSelect() {
+  const select = elements.courseSelect;
+  if (!select) {
+    return;
+  }
+  const signature = state.courses.map((course) => `${course.id}:${course.name}`).join('|');
+  if (signature === state.courseSelectSignature) {
+    return;
+  }
+  state.courseSelectSignature = signature;
+  const previous = select.value;
+  const previousAuto = select.querySelector('option[data-auto="1"]');
+  const autoLabel = previousAuto ? previousAuto.textContent : '自动识别';
+  const fragment = document.createDocumentFragment();
+  const auto = document.createElement('option');
+  auto.value = '';
+  auto.dataset.auto = '1';
+  // 轮询会每 2 秒重建一次，自动项的文字要保留，否则「自动：某课程」会被刷回默认
+  auto.textContent = autoLabel;
+  fragment.appendChild(auto);
+  state.courses.forEach((course) => {
+    const option = document.createElement('option');
+    option.value = course.id;
+    option.textContent = course.name;
+    fragment.appendChild(option);
+  });
+  select.replaceChildren(fragment);
+  if (previous && Array.from(select.options).some((option) => option.value === previous)) {
+    select.value = previous;
+  }
+}
+
+async function suggestCourse() {
+  const auto = elements.courseSelect.querySelector('option[data-auto="1"]');
+  if (!auto) {
+    return;
+  }
+  const payload =
+    state.sourceType === 'local'
+      ? { source_type: 'local', source_ref: state.local.path, title: state.local.title, entry_index: 0 }
+      : {
+          source_type: 'bilibili',
+          source_ref: state.bilibili.infoUrl,
+          title: '',
+          entry_index: state.bilibili.entryIndex
+        };
+  if (!payload.source_ref) {
+    auto.textContent = '自动识别';
+    return;
+  }
+  try {
+    const query = new URLSearchParams({
+      source_type: payload.source_type,
+      source_ref: payload.source_ref,
+      entry_index: String(payload.entry_index),
+      title: payload.title || ''
+    });
+    const result = await api(`/api/courses/suggest?${query.toString()}`);
+    if (result.course_id) {
+      if (elements.courseSelect.value === '') {
+        elements.courseSelect.value = result.course_id;
+      }
+    } else if (result.name) {
+      auto.textContent = `自动：${result.name}`;
+    } else {
+      auto.textContent = '自动：杂项';
+    }
+  } catch (error) {
+    auto.textContent = '自动识别';
+  }
+}
+
+function endNewCourse(input) {
+  if (input && input.isConnected) {
+    input.remove();
+  }
+  elements.courseSelect.hidden = false;
+  elements.courseNew.textContent = '新建';
+}
+
+// 不用 window.prompt：WebView 里对原生弹窗的支持不确定，内联输入更稳。
+function beginNewCourse() {
+  const row = elements.courseSelect.parentElement;
+  const existing = row.querySelector('.course-new-input');
+  if (existing) {
+    endNewCourse(existing);
+    return;
+  }
+  const input = document.createElement('input');
+  input.className = 'input course-new-input';
+  input.type = 'text';
+  input.maxLength = 120;
+  input.placeholder = '课程名，回车创建';
+  elements.courseSelect.hidden = true;
+  row.insertBefore(input, elements.courseSelect);
+  elements.courseNew.textContent = '取消';
+  input.focus();
+
+  let settled = false;
+  const finish = async (save) => {
+    if (settled) {
+      return;
+    }
+    const name = input.value.trim();
+    if (!save || !name) {
+      settled = true;
+      endNewCourse(input);
+      return;
+    }
+    settled = true;
+    try {
+      const result = await api('/api/courses', {
+        method: 'POST',
+        body: JSON.stringify({ name })
+      });
+      endNewCourse(input);
+      await refreshCourses();
+      if (result.course) {
+        elements.courseSelect.value = result.course.id;
+      }
+      showToast(`已创建课程「${name}」。`, 'success');
+    } catch (error) {
+      settled = false;
+      showToast(error.message, 'error');
+    }
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finish(true);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener('blur', () => finish(true));
 }
 
 function createStatusBadge(status) {
@@ -1085,7 +1680,7 @@ function cancelSelectedJob() {
     const updated = await api(`/api/jobs/${encodeURIComponent(job.id)}/cancel`, { method: 'POST' });
     state.currentJob = updated;
     upsertJob(updated);
-    renderHistory();
+    refreshLists();
     renderCurrentJob();
     showToast('已请求取消任务。', 'success');
     await refreshJobs();
@@ -1101,7 +1696,7 @@ function confirmSelectedJob() {
     const updated = await api(`/api/jobs/${encodeURIComponent(job.id)}/confirm`, { method: 'POST' });
     state.currentJob = updated;
     upsertJob(updated);
-    renderHistory();
+    refreshLists();
     renderCurrentJob();
     showToast('已确认，开始生成学习笔记。', 'success');
     await refreshJobs();
@@ -1125,9 +1720,12 @@ function deleteJob(id, button) {
       state.currentJob = null;
       state.detailRequest += 1;
     }
-    renderHistory();
+    if (state.view === 'job') {
+      goBackFromJob();
+    }
+    refreshLists();
     renderCurrentJob();
-    showToast('历史任务已删除。', 'success');
+    showToast('已删除这条记录。', 'success');
     await refreshJobs();
   });
 }
@@ -1189,14 +1787,22 @@ function setupTextMenu() {
     if (!elements.textMenu.hidden && !elements.textMenu.contains(event.target)) {
       closeTextMenu();
     }
+    if (!elements.cardMenu.hidden && !elements.cardMenu.contains(event.target)) {
+      closeNoteMenu();
+    }
   });
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       closeTextMenu();
+      closeNoteMenu();
     }
   });
   window.addEventListener('scroll', closeTextMenu, true);
-  window.addEventListener('resize', closeTextMenu);
+  window.addEventListener('scroll', closeNoteMenu, true);
+  window.addEventListener('resize', () => {
+    closeTextMenu();
+    closeNoteMenu();
+  });
   elements.textMenu.addEventListener('click', handleTextMenuClick);
 }
 

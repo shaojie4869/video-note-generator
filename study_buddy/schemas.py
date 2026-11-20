@@ -36,11 +36,22 @@ class JobCreate(BaseModel):
     entry_index: int = Field(default=0, ge=0)
     force: bool = False
     confirm_long: bool = False
+    # 生成前指定的课程；留空表示交给自动归组
+    course_id: str = ""
+
+
+class CourseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class CourseRename(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
 
 
 class MessageResponse(BaseModel):
     message: str
 
 
-class JobRename(BaseModel):
-    title: str = Field(min_length=1, max_length=120)
+class JobUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    course_id: str | None = None

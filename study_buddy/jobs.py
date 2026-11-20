@@ -66,6 +66,19 @@ class JobManager:
         title = payload.title or (
             Path(payload.source_ref).stem if payload.source_type == "local" else "B站课程"
         )
+        course_id = (payload.course_id or "").strip()
+        if course_id:
+            # 前端指定了课程就照办，但课程可能已被删除，退回自动归组。
+            if not await asyncio.to_thread(self.db.get_course, course_id):
+                course_id = ""
+        if not course_id:
+            course_id = await asyncio.to_thread(
+                self.db.ensure_course_for_job,
+                payload.source_type,
+                payload.source_ref.strip(),
+                title,
+                payload.entry_index,
+            )
         job = await asyncio.to_thread(
             self.db.create_job,
             payload.source_type,
@@ -73,6 +86,7 @@ class JobManager:
             title,
             cache_key,
             payload.entry_index,
+            course_id,
         )
         if payload.force:
             reusable = await asyncio.to_thread(self.db.find_reusable_transcript, cache_key)
