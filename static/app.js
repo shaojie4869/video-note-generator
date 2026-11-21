@@ -74,7 +74,7 @@ function init() {
     'bilibili-url', 'bilibili-info-button', 'bilibili-result', 'bilibili-title', 'bilibili-entry',
     'source-hint', 'start-button', 'course-count', 'course-refresh-status', 'course-empty', 'course-list',
     'course-select', 'course-new', 'course-hint', 'records-open', 'records-entry-meta',
-    'course-view', 'course-title', 'course-meta', 'course-rename', 'course-more', 'course-active', 'course-notes', 'course-notes-empty',
+    'course-view', 'course-title', 'course-meta', 'course-more', 'course-active', 'course-notes', 'course-notes-empty',
     'records-view', 'records-meta', 'records-list', 'usage-badge', 'card-menu',
     'job-back', 'prev-note', 'next-note',
     'job-empty', 'job-detail', 'job-title', 'job-status', 'job-provider', 'job-created', 'job-usage', 'job-stage',
@@ -157,7 +157,6 @@ function bindEvents() {
   elements.startButton.addEventListener('click', startNewJob);
   elements.courseNew.addEventListener('click', beginNewCourse);
   elements.recordsOpen.addEventListener('click', openRecords);
-  elements.courseRename.addEventListener('click', startRenameCourse);
   elements.courseMore.addEventListener('click', (event) => {
     event.stopPropagation();
     openCourseMenu(elements.courseMore);
