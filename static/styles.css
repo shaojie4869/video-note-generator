@@ -1040,8 +1040,8 @@ select.input {
   background: rgba(255, 255, 255, 0.82);
   box-shadow: none;
   color: #443d5c;
-  font-size: 14px;
-  line-height: 1.85;
+  font-size: 16px;
+  line-height: 1.9;
   overflow-wrap: anywhere;
 }
 
@@ -1065,23 +1065,23 @@ select.input {
 }
 
 .markdown-body h1 {
-  font-size: 24px;
+  font-size: 26px;
 }
 
 .markdown-body h2 {
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
-  font-size: 20px;
+  font-size: 21px;
 }
 
 .markdown-body h3 {
-  font-size: 17px;
+  font-size: 18px;
 }
 
 .markdown-body h4,
 .markdown-body h5,
 .markdown-body h6 {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .markdown-body p {
@@ -1191,8 +1191,8 @@ select.input {
   border-top: 1px solid var(--border);
   border-radius: 0;
   background: #fff;
-  font-size: 13px;
-  line-height: 1.8;
+  font-size: 14.5px;
+  line-height: 1.85;
   overflow-wrap: anywhere;
 }
 
@@ -1205,7 +1205,7 @@ select.input {
   margin: 1.1em 0 0.45em;
   padding-bottom: 0;
   border-bottom: 0;
-  font-size: 15px;
+  font-size: 16px;
 }
 
 .visual-notes h1:first-child,
@@ -1390,7 +1390,7 @@ select.input {
 
 .quiz-no {
   color: var(--primary);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.04em;
 }
@@ -1398,7 +1398,7 @@ select.input {
 .quiz-badge {
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 500;
   white-space: nowrap;
 }
@@ -1429,7 +1429,7 @@ select.input {
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
   white-space: nowrap;
 }
 
@@ -1452,16 +1452,16 @@ select.input {
 .quiz-question {
   margin: 0 0 10px;
   color: var(--text);
-  font-size: 14px;
-  line-height: 1.75;
+  font-size: 16px;
+  line-height: 1.8;
 }
 
 .quiz-options {
   margin: 0 0 12px;
   padding-left: 1.4em;
   color: #55506b;
-  font-size: 13px;
-  line-height: 1.8;
+  font-size: 14.5px;
+  line-height: 1.85;
 }
 
 .quiz-card-actions {
@@ -1592,8 +1592,8 @@ select.input {
   display: flex;
   gap: 8px;
   margin: 0;
-  font-size: 13px;
-  line-height: 1.8;
+  font-size: 14.5px;
+  line-height: 1.85;
 }
 
 .quiz-answer-line + .quiz-answer-line {
