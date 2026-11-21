@@ -443,6 +443,19 @@ class Database:
                 ).fetchone()
                 if row:
                     return dict(row)
+            if kind == "course":
+                # 同一个文件夹被移动/改名后 source_key 会变，但课程名没变。
+                # 只按 source_key 判重会凭空多出一门同名课，所以名字再兜一层。
+                row = connection.execute(
+                    """
+                    SELECT * FROM courses
+                    WHERE kind = 'course' AND trim(name) = ?
+                    ORDER BY created_at LIMIT 1
+                    """,
+                    (name,),
+                ).fetchone()
+                if row:
+                    return dict(row)
             course_id = uuid.uuid4().hex
             connection.execute(
                 """
@@ -469,6 +482,69 @@ class Database:
             connection.execute(
                 "UPDATE courses SET viewed_at = ? WHERE id = ?", (utc_now(), course_id)
             )
+
+    def delete_course(self, course_id: str) -> tuple[bool, int]:
+        """删课程。里面的笔记不退场，统一挪进「杂项」，避免误删丢数据。
+
+        返回 ``(是否删除, 被移动的笔记数)``。
+        """
+        if not course_id or course_id == MISC_COURSE_ID:
+            return False, 0
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM courses WHERE id = ?", (course_id,)
+            ).fetchone()
+            if not row:
+                return False, 0
+            moved = connection.execute(
+                "SELECT COUNT(*) FROM jobs WHERE course_id = ?", (course_id,)
+            ).fetchone()[0]
+            connection.execute(
+                "UPDATE jobs SET course_id = ?, updated_at = ? WHERE course_id = ?",
+                (MISC_COURSE_ID, utc_now(), course_id),
+            )
+            connection.execute("DELETE FROM courses WHERE id = ?", (course_id,))
+        return True, int(moved)
+
+    def merge_duplicate_courses(self) -> int:
+        """把同名的课程并成一门，返回被并掉的课程数。
+
+        历史遗留：同一个课程目录被移动后 source_key 变了，会多出一门同名课
+        （一门有笔记、一门空）。这里统一并到笔记最多的那门上。
+        """
+        removed = 0
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.id, trim(c.name) AS name,
+                       (SELECT COUNT(*) FROM jobs j WHERE j.course_id = c.id) AS notes,
+                       c.created_at
+                FROM courses c WHERE c.kind = 'course'
+                ORDER BY c.created_at
+                """
+            ).fetchall()
+            groups: dict[str, list[Any]] = {}
+            for row in rows:
+                groups.setdefault(row["name"], []).append(row)
+            for name, items in groups.items():
+                if len(items) < 2:
+                    continue
+                target = sorted(
+                    items, key=lambda item: (-item["notes"], item["created_at"])
+                )[0]
+                for item in items:
+                    if item["id"] == target["id"]:
+                        continue
+                    connection.execute(
+                        """
+                        UPDATE jobs SET course_id = ?, updated_at = ?
+                        WHERE course_id = ?
+                        """,
+                        (target["id"], utc_now(), item["id"]),
+                    )
+                    connection.execute("DELETE FROM courses WHERE id = ?", (item["id"],))
+                    removed += 1
+        return removed
 
     def move_job(self, job_id: str, course_id: str) -> bool:
         with self._lock, self._connect() as connection:

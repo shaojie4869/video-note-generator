@@ -74,7 +74,7 @@ function init() {
     'bilibili-url', 'bilibili-info-button', 'bilibili-result', 'bilibili-title', 'bilibili-entry',
     'source-hint', 'start-button', 'course-count', 'course-refresh-status', 'course-empty', 'course-list',
     'course-select', 'course-new', 'course-hint', 'records-open', 'records-entry-meta',
-    'course-view', 'course-title', 'course-meta', 'course-rename', 'course-notes', 'course-notes-empty',
+    'course-view', 'course-title', 'course-meta', 'course-rename', 'course-more', 'course-active', 'course-notes', 'course-notes-empty',
     'records-view', 'records-meta', 'records-list', 'usage-badge', 'card-menu',
     'job-back', 'prev-note', 'next-note',
     'job-empty', 'job-detail', 'job-title', 'job-status', 'job-provider', 'job-created', 'job-usage', 'job-stage',
@@ -158,6 +158,10 @@ function bindEvents() {
   elements.courseNew.addEventListener('click', beginNewCourse);
   elements.recordsOpen.addEventListener('click', openRecords);
   elements.courseRename.addEventListener('click', startRenameCourse);
+  elements.courseMore.addEventListener('click', (event) => {
+    event.stopPropagation();
+    openCourseMenu(elements.courseMore);
+  });
   elements.jobBack.addEventListener('click', goBackFromJob);
   elements.prevNote.addEventListener('click', () => stepNote(-1));
   elements.nextNote.addEventListener('click', () => stepNote(1));
@@ -580,6 +584,10 @@ async function refreshJobs({ initial = false } = {}) {
       renderRecords();
     }
     notifyCompleted(previous, state.jobs);
+    // 停在课程页时，进度条要跟着轮询走，否则切回来只剩一个静止的数字
+    if (state.view === 'course' && state.currentCourseId) {
+      renderCourseActive();
+    }
 
     if (state.selectedId) {
       const listed = state.jobs.find((job) => job.id === state.selectedId);
@@ -753,7 +761,13 @@ function renderCourses() {
 
     const meta = document.createElement('div');
     meta.className = 'course-meta';
-    meta.textContent = course.note_count > 0 ? `${course.note_count} 条笔记` : '暂无笔记';
+    const running = courseActiveJobs(course.id).length;
+    const bits = [course.note_count > 0 ? `${course.note_count} 条笔记` : '暂无笔记'];
+    if (running) {
+      bits.push(`${running} 个生成中`);
+      meta.classList.add('is-running');
+    }
+    meta.textContent = bits.join(' · ');
 
     button.append(name, meta);
     button.addEventListener('click', () => openCourse(course.id));
@@ -776,6 +790,7 @@ async function openCourse(courseId) {
   elements.courseTitle.textContent = '读取中…';
   elements.courseMeta.textContent = '';
   elements.courseNotes.replaceChildren();
+  elements.courseActive.replaceChildren();
   elements.courseNotesEmpty.hidden = true;
   try {
     const result = await api(`/api/courses/${encodeURIComponent(courseId)}`);
@@ -795,11 +810,98 @@ function renderCourseView() {
     return;
   }
   elements.courseTitle.textContent = course.name;
+  elements.courseMore.hidden = course.kind === 'misc';
+  renderCourseActive();
+  renderCourseNotes();
+}
+
+/**
+ * 正在生成的任务：课程页顶部单独一栏。
+ * 进度直接取 state.jobs（每 2 秒轮询），所以切换课程再回来仍能看到，
+ * 不会因为「课程笔记接口只返回已完成」而变成空状态。
+ */
+function courseActiveJobs(courseId = state.currentCourseId) {
+  if (!courseId) {
+    return [];
+  }
+  const seen = new Set();
+  return state.jobs.filter((job) => {
+    if (job.course_id !== courseId || !ACTIVE_STATUSES.has(job.status)) {
+      return false;
+    }
+    const key = job.cache_key || job.id;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function renderCourseActive() {
+  const course = state.currentCourse;
+  if (!course) {
+    return;
+  }
+  const active = courseActiveJobs();
   const total = state.courseNotes.length;
   const order = course.kind === 'misc' ? '按时间排序' : '按章节排序';
-  elements.courseMeta.textContent = total ? `${total} 条笔记 · ${order}` : '暂无笔记';
-  elements.courseNotesEmpty.hidden = total > 0;
+  const parts = [];
+  if (total) {
+    parts.push(`${total} 条笔记`);
+  }
+  if (active.length) {
+    parts.push(`${active.length} 个生成中`);
+  }
+  elements.courseMeta.textContent = parts.length ? `${parts.join(' · ')} · ${order}` : '暂无笔记';
+  // 有任务在跑时不能显示「还没有笔记」，否则会把生成中的状态盖掉
+  elements.courseNotesEmpty.hidden = total > 0 || active.length > 0;
 
+  const fragment = document.createDocumentFragment();
+  active.forEach((job) => fragment.appendChild(activeJobRow(job)));
+  elements.courseActive.replaceChildren(fragment);
+}
+
+function activeJobRow(job) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'active-job';
+  row.title = '打开生成详情';
+  row.addEventListener('click', () => openNote(job.id));
+
+  const head = document.createElement('div');
+  head.className = 'active-job-head';
+  if (job.seq) {
+    const seq = document.createElement('span');
+    seq.className = 'active-job-seq';
+    seq.textContent = job.seq;
+    head.appendChild(seq);
+  }
+  const title = document.createElement('span');
+  title.className = 'active-job-title';
+  // 和笔记卡片一样去掉标题里重复的章节号（「2-1」+「2-1 进程」）
+  title.textContent = noteTitle(job);
+  head.appendChild(title);
+  const percent = document.createElement('span');
+  percent.className = 'active-job-pct';
+  percent.textContent = `${normalizeProgress(job.progress)}%`;
+  head.appendChild(percent);
+
+  const track = document.createElement('div');
+  track.className = 'active-job-track';
+  const bar = document.createElement('span');
+  bar.style.width = `${normalizeProgress(job.progress)}%`;
+  track.appendChild(bar);
+
+  const stage = document.createElement('div');
+  stage.className = 'active-job-stage';
+  stage.textContent = job.stage || STATUS_LABELS[job.status] || '处理中';
+
+  row.append(head, track, stage);
+  return row;
+}
+
+function renderCourseNotes() {
   const fragment = document.createDocumentFragment();
   let lastChapter = null;
   state.courseNotes.forEach((note) => {
@@ -1029,6 +1131,12 @@ function openNoteMenu(jobId, anchor) {
 
   menu.replaceChildren(fragment);
   menu.hidden = false;
+  positionCardMenu(anchor);
+}
+
+// 菜单贴着按钮弹出，靠近窗口下缘时向上翻，避免被裁掉
+function positionCardMenu(anchor) {
+  const menu = elements.cardMenu;
   const rect = anchor.getBoundingClientRect();
   const width = menu.offsetWidth;
   const height = menu.offsetHeight;
@@ -1038,6 +1146,71 @@ function openNoteMenu(jobId, anchor) {
     : rect.bottom + 6;
   menu.style.left = `${Math.max(12, left)}px`;
   menu.style.top = `${top}px`;
+}
+
+function openCourseMenu(anchor) {
+  const course = state.currentCourse;
+  if (!course) {
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  fragment.appendChild(menuItem('重命名课程', startRenameCourse));
+
+  const sep = document.createElement('div');
+  sep.className = 'card-menu-sep';
+  fragment.appendChild(sep);
+
+  if (course.kind !== 'misc') {
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'text-menu-item is-danger';
+    remove.textContent = '删除课程';
+    fragment.appendChild(remove);
+
+    // 提示跟在「删除课程」下面，否则夹在两个菜单项中间会被读成重命名的说明
+    const notes = state.courseNotes.length;
+    const hint = document.createElement('div');
+    hint.className = 'card-menu-hint';
+    hint.textContent = notes ? `删除后 ${notes} 条笔记会移到「杂项」` : '这门课没有笔记';
+    fragment.appendChild(hint);
+
+    // 二次确认：菜单原地换成确认项，避免手滑直接删掉
+    remove.addEventListener('click', () => {
+      const confirmFragment = document.createDocumentFragment();
+      const tip = document.createElement('div');
+      tip.className = 'card-menu-hint';
+      tip.textContent = `确认删除「${course.name}」？`;
+      confirmFragment.appendChild(tip);
+      confirmFragment.appendChild(menuItem('确认删除', () => removeCourse(course)));
+      confirmFragment.appendChild(menuItem('取消', () => {}));
+      elements.cardMenu.replaceChildren(confirmFragment);
+    });
+  }
+
+  elements.cardMenu.replaceChildren(fragment);
+  elements.cardMenu.hidden = false;
+  positionCardMenu(anchor);
+}
+
+async function removeCourse(course) {
+  try {
+    const result = await api(`/api/courses/${encodeURIComponent(course.id)}`, {
+      method: 'DELETE'
+    });
+    showToast(
+      result.moved ? `课程已删除，${result.moved} 条笔记移到「杂项」。` : '课程已删除。',
+      'success'
+    );
+    state.currentCourseId = '';
+    state.currentCourse = null;
+    state.courseNotes = [];
+    state.selectedId = null;
+    state.currentJob = null;
+    await refreshCourses();
+    setView('home');
+  } catch (error) {
+    showToast(error.message, 'error');
+  }
 }
 
 async function moveNote(jobId, courseId, courseName) {

@@ -52,6 +52,8 @@ async def lifespan(_: FastAPI):
     database.mark_interrupted()
     # 升级到课程层后，历史任务需要补一次归属；只做本地推断，不发网络请求。
     await asyncio.to_thread(database.assign_missing_courses)
+    # 同一目录被移动过会产生同名课程，启动时并掉，免得左栏出现两门一样的课。
+    await asyncio.to_thread(database.merge_duplicate_courses)
     yield
 
 
@@ -249,6 +251,17 @@ def rename_course(course_id: str, payload: CourseRename) -> dict:
     if not database.rename_course(course_id, payload.name):
         raise HTTPException(status_code=400, detail="课程名不能为空。")
     return {"course": database.get_course(course_id)}
+
+
+@app.delete("/api/courses/{course_id}")
+def delete_course(course_id: str) -> dict:
+    """删除课程。课里的笔记不会被删掉，统一移进「杂项」。"""
+    if course_id == MISC_COURSE_ID:
+        raise HTTPException(status_code=400, detail="「杂项」是固定容器，不能删除。")
+    ok, moved = database.delete_course(course_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="课程不存在。")
+    return {"deleted": True, "moved": moved, "misc_id": MISC_COURSE_ID}
 
 
 @app.get("/api/courses/suggest")

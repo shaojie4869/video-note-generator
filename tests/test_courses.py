@@ -127,3 +127,49 @@ def test_suggest_prefers_existing_course(tmp_path):
             },
         ).json()
         assert result["course_id"] == course["id"]
+
+
+def test_same_name_different_folder_reuses_course(tmp_path):
+    """课程目录被移动后 source_key 变了，不能凭空多出一门同名课。"""
+    database = Database(tmp_path / "history.db")
+    first = database.create_course("操作系统精讲课", "course", "dir:D:/a/操作系统精讲课")
+    second = database.create_course("操作系统精讲课", "course", "dir:D:/b/操作系统精讲课")
+    assert second["id"] == first["id"]
+    # 不同名字仍然各建一门
+    other = database.create_course("数据结构精讲课", "course", "dir:D:/c/数据结构精讲课")
+    assert other["id"] != first["id"]
+
+
+def test_merge_duplicate_courses_keeps_the_one_with_notes(tmp_path):
+    database = Database(tmp_path / "history.db")
+    main = database.create_course("操作系统精讲课", "course", "dir:D:/old")
+    empty = database.create_course("临时课程", "course", "dir:D:/new")
+    # 用改名绕过 create_course 的名字去重，模拟历史数据里已经存在的同名课程
+    database.rename_course(empty["id"], "操作系统精讲课")
+
+    kept_jobs = [
+        database.create_job("local", f"D:/old/{index}.mp4", f"1-{index} 课", f"k{index}", 0, main["id"])
+        for index in (2, 3)
+    ]
+    moved_job = database.create_job("local", "D:/new/1.mp4", "1-4 课", "k4", 0, empty["id"])
+
+    assert database.merge_duplicate_courses() == 1
+    remaining = [c for c in database.list_courses() if c["kind"] == "course"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == main["id"]
+    for job in kept_jobs + [moved_job]:
+        assert database.get_job(job["id"])["course_id"] == main["id"]
+
+
+def test_delete_course_moves_notes_to_misc(tmp_path):
+    database = Database(tmp_path / "history.db")
+    course = database.create_course("操作系统精讲课", "course", "dir:D:/os")
+    job = database.create_job("local", "D:/os/a.mp4", "1-2 发展历程", "k1", 0, course["id"])
+
+    ok, moved = database.delete_course(course["id"])
+    assert ok is True and moved == 1
+    assert database.get_course(course["id"]) is None
+    assert database.get_job(job["id"])["course_id"] == MISC_COURSE_ID
+    # 杂项不能删
+    assert database.delete_course(MISC_COURSE_ID) == (False, 0)
+

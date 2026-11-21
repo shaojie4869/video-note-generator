@@ -1837,6 +1837,20 @@ select.input {
   transition: background 120ms ease, color 120ms ease;
 }
 
+.text-menu-item.is-danger {
+  color: var(--danger);
+}
+
+.text-menu-item.is-danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.card-menu-hint {
+  padding: 6px 12px 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
 .text-menu-item:hover:not(:disabled) {
   background: var(--primary-soft);
   color: var(--primary);
@@ -2281,6 +2295,10 @@ select.input {
   font-size: 11.5px;
 }
 
+.course-meta.is-running {
+  color: var(--primary);
+}
+
 .course-unread {
   position: absolute;
   top: 13px;
@@ -2368,6 +2386,85 @@ select.input {
   grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
   gap: 10px;
   margin-top: 18px;
+}
+
+/* 生成中的任务：课程页顶部一栏，进度条随轮询实时更新 */
+.course-active {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.course-active:empty {
+  display: none;
+}
+
+.active-job {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid var(--primary);
+  border-radius: 12px;
+  background: var(--primary-soft);
+  text-align: left;
+  cursor: pointer;
+  transition: box-shadow 150ms ease, transform 150ms ease;
+}
+
+.active-job:hover {
+  box-shadow: 0 6px 18px rgba(107, 76, 190, 0.14);
+  transform: translateY(-1px);
+}
+
+.active-job-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.active-job-seq {
+  flex: none;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.active-job-title {
+  flex: 1;
+  min-width: 0;
+  color: #4c2f9e;
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.active-job-pct {
+  flex: none;
+  color: var(--primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.active-job-track {
+  height: 6px;
+  margin: 9px 0 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e6dcfb;
+}
+
+.active-job-track span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #a78bfa, #7c3aed);
+  transition: width 400ms ease;
+}
+
+.active-job-stage {
+  color: var(--muted);
+  font-size: 11.5px;
 }
 
 .course-chapter {
