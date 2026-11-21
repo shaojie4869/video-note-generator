@@ -59,6 +59,13 @@ class JobManager:
 
     async def create(self, payload: JobCreate) -> tuple[dict[str, Any], bool]:
         cache_key = await asyncio.to_thread(self.cache_key, payload)
+        # 同一个视频只允许一个任务在跑：误点「开始生成」不该重复下载、重复转写。
+        # 前端也会在选中项已有任务时禁用按钮，这里是最后一道闸。
+        active = await asyncio.to_thread(self.db.find_active, cache_key)
+        if active:
+            if payload.force:
+                raise ValueError("这个视频正在生成中，请等它完成，或先取消当前任务。")
+            return active, True
         if not payload.force:
             existing = await asyncio.to_thread(self.db.find_completed, cache_key)
             if existing:

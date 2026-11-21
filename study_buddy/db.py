@@ -201,6 +201,20 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def find_active(self, cache_key: str) -> dict[str, Any] | None:
+        """同一视频是否已有任务在跑。用来挡住重复提交，避免白烧 GPU 和 token。"""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM jobs
+                WHERE cache_key = ?
+                  AND status IN ('queued', 'running', 'waiting_confirmation')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (cache_key,),
+            ).fetchone()
+        return dict(row) if row else None
+
     def find_completed(self, cache_key: str) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute(

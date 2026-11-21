@@ -41,6 +41,40 @@ def test_force_reuses_transcript_from_failed_job(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_duplicate_submit_is_blocked_while_running(tmp_path, monkeypatch):
+    """同一个视频重复点「开始生成」不应该再起一个任务。"""
+
+    async def scenario():
+        database = Database(tmp_path / "history.db")
+        manager = JobManager(database, settings=None, summary=None)
+        manager._start = lambda *args: None
+        monkeypatch.setattr(
+            JobManager, "cache_key", staticmethod(lambda payload: "cache-key")
+        )
+        first, reused = await manager.create(
+            JobCreate(source_type="local", source_ref="D:/a.mp4")
+        )
+        assert reused is False
+
+        second, reused_again = await manager.create(
+            JobCreate(source_type="local", source_ref="D:/a.mp4")
+        )
+        assert reused_again is True
+        assert second["id"] == first["id"]
+
+        # 正在跑的时候强制重新生成也要拒绝，否则会并发跑两份
+        try:
+            await manager.create(
+                JobCreate(source_type="local", source_ref="D:/a.mp4", force=True)
+            )
+        except ValueError as exc:
+            assert "正在生成中" in str(exc)
+        else:
+            raise AssertionError("运行中的任务不该允许 force 再建一个")
+
+    asyncio.run(scenario())
+
+
 def test_refresh_bilibili_title_replaces_placeholder(tmp_path):
     """重新生成会复制原任务标题，占位标题必须在这一步换成真实标题。"""
 

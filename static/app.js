@@ -409,8 +409,42 @@ function updateStartState() {
     }
   }
   const sourceBusy = elements.browseButton.dataset.busy === 'true' || elements.bilibiliInfoButton.dataset.busy === 'true';
+  // 选中的视频已经有任务在跑时不许再提交：重复点会并发转写、白烧显卡
+  const running = activeJobForSelection();
+  if (canStart && running) {
+    canStart = false;
+    elements.sourceHint.textContent = `《${running.title || '该视频'}》正在生成中，可在左侧课程里查看进度。`;
+  }
   setButtonDisabled(elements.startButton, !canStart || sourceBusy);
   setButtonDisabled(elements.bilibiliInfoButton, !elements.bilibiliUrl.value.trim());
+}
+
+// 当前选中的视频是否已有任务在跑（按来源与分P 精确匹配）
+function activeJobForSelection() {
+  const isActive = (job) => ACTIVE_STATUSES.has(job.status);
+  if (state.sourceType === 'local') {
+    if (!state.local.path) {
+      return null;
+    }
+    return state.jobs.find(
+      (job) => isActive(job) && job.source_type === 'local' && job.source_ref === state.local.path
+    ) || null;
+  }
+  const info = state.bilibili.info;
+  if (!info) {
+    return null;
+  }
+  const bvid = (String(state.bilibili.infoUrl).match(/BV[0-9A-Za-z]{10}/) || [])[0] || '';
+  const entry = Number(state.bilibili.entryIndex || 0);
+  return state.jobs.find((job) => {
+    if (!isActive(job) || job.source_type !== 'bilibili') {
+      return false;
+    }
+    if (Number(job.entry_index || 0) !== entry) {
+      return false;
+    }
+    return bvid ? String(job.source_ref).includes(bvid) : job.source_ref === state.bilibili.infoUrl;
+  }) || null;
 }
 
 function startNewJob() {
@@ -549,13 +583,33 @@ function createJob(payload, button) {
     setView('job');
     renderCurrentJob();
     refreshLists();
+    // 提交成功后立刻清空选择：表单留着上一次的视频，很容易被再点一次
+    clearSourceSelection();
     if (result.reused) {
-      showToast('已读取历史总结，没有重复调用模型', 'success');
+      showToast(
+        ACTIVE_STATUSES.has(result.job.status)
+          ? '这个视频正在生成中，已为你打开它的进度。'
+          : '已读取历史总结，没有重复调用模型',
+        'success'
+      );
     } else {
       showToast(payload.force ? '已开始重新生成总结。' : '任务已创建，开始处理视频。', 'success');
     }
     await refreshJobs();
   });
+}
+
+function clearSourceSelection() {
+  state.local = { path: '', title: '' };
+  state.bilibili.info = null;
+  state.bilibili.infoUrl = '';
+  state.bilibili.entryIndex = 0;
+  elements.bilibiliUrl.value = '';
+  elements.bilibiliEntry.value = '0';
+  renderLocalSelection();
+  renderBilibiliInfo();
+  updateStartState();
+  suggestCourse();
 }
 
 function upsertJob(job) {
@@ -576,6 +630,8 @@ async function refreshJobs({ initial = false } = {}) {
     const previous = state.jobs;
     const result = await api('/api/jobs');
     state.jobs = Array.isArray(result.jobs) ? result.jobs : [];
+    // 任务状态变化会影响「开始生成」能不能点，跟着刷新一次
+    updateStartState();
     elements.recordsEntryMeta.textContent = state.jobs.length
       ? `共 ${state.jobs.length} 条`
       : '按时间查看';
@@ -1059,8 +1115,24 @@ function renderRecords() {
     cost.textContent = jobDuration(job) || '—';
 
     const tail = document.createElement('span');
-    tail.className = 'records-num';
-    tail.textContent = `${formatTokens(job.tokens || 0)} · ${STATUS_LABELS[job.status] || job.status}`;
+    tail.className = 'records-tail';
+    const tailText = document.createElement('span');
+    tailText.className = 'records-num';
+    tailText.textContent = `${formatTokens(job.tokens || 0)} · ${STATUS_LABELS[job.status] || job.status}`;
+    tail.appendChild(tailText);
+    if (ACTIVE_STATUSES.has(job.status)) {
+      // 误触重复生成时，这里能直接掐掉，不用再点进详情
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'records-cancel';
+      cancel.textContent = '取消';
+      cancel.title = '停止这个任务，已完成的转写会保留';
+      cancel.addEventListener('click', (event) => {
+        event.stopPropagation();
+        cancelJobById(job.id, cancel);
+      });
+      tail.appendChild(cancel);
+    }
 
     row.append(time, title, cost, tail);
     if (job.summary_chars > 0) {
@@ -1852,6 +1924,15 @@ async function requestQuestions(button) {
     button.disabled = false;
     button.textContent = label;
   }
+}
+
+async function cancelJobById(jobId, button) {
+  await withBusy(button, async () => {
+    const updated = await api(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+    upsertJob(updated);
+    showToast('已请求取消任务。', 'success');
+    await refreshJobs();
+  });
 }
 
 function cancelSelectedJob() {
