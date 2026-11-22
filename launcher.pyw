@@ -13,6 +13,20 @@ URL = "http://127.0.0.1:8765"
 PORT = 8765
 TITLE = "学习视频总结"
 ICON = BASE_DIR / "assets" / "icon.ico"
+_ICON_HANDLES: list[int] = []
+
+
+def bind_app_identity() -> None:
+    """声明应用身份并注册任务栏图标。
+
+    AppUserModelID 不统一时，固定到任务栏会变成 Python 图标、还会和桌面快捷方式分裂；
+    注册表里的 IconUri 是不打包 exe 也能让固定项用对图标的办法。
+    """
+    from study_buddy.app_identity import bind_process, register
+
+    bind_process()
+    pythonw = BASE_DIR / ".venv" / "Scripts" / "pythonw.exe"
+    register(ICON, BASE_DIR / "launcher.pyw", pythonw)
 
 
 def health() -> dict | None:
@@ -125,40 +139,65 @@ def ensure_server() -> bool:
     return True
 
 
+def apply_window_icon() -> None:
+    """把窗口图标换成应用图标，任务栏、Alt+Tab、标题栏一起生效。
+
+    pywebview 的 WinForms 后端默认从 pythonw.exe 抠图标，所以任务栏一直是 Python 的图标。
+    主路径是在 webview.start(icon=...) 里传图标；这里再用 Win32 兜一层，
+    因为 WinForms 在窗口激活、从最小化还原时会重新下发 WM_SETICON。
+    """
+    if not ICON.exists():
+        return
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.LoadImageW.argtypes = [
+        wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+        ctypes.c_int, ctypes.c_int, wintypes.UINT,
+    ]
+    user32.LoadImageW.restype = wintypes.HANDLE
+    user32.SendMessageW.argtypes = [
+        wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+    ]
+    user32.SendMessageW.restype = ctypes.c_void_p
+
+    image_icon, lr_loadfromfile, lr_defaultsize = 1, 0x0010, 0x0040
+    wm_seticon, icon_small, icon_big = 0x0080, 0, 1
+    gclp_hicon, gclp_hiconsm = -14, -34
+    big = user32.LoadImageW(0, str(ICON), image_icon, 0, 0, lr_loadfromfile | lr_defaultsize)
+    small = user32.LoadImageW(0, str(ICON), image_icon, 16, 16, lr_loadfromfile)
+    # 句柄被回收后图标会变成空白，必须一直持有。
+    _ICON_HANDLES.extend(handle for handle in (big, small) if handle)
+
+    for _ in range(24):
+        handle = user32.FindWindowW(None, TITLE)
+        if handle:
+            if big:
+                user32.SendMessageW(handle, wm_seticon, icon_big, big)
+            if small:
+                user32.SendMessageW(handle, wm_seticon, icon_small, small)
+            # 同时改窗口类图标：任务栏和 Alt+Tab 读的是它，只发 WM_SETICON 有时不刷新。
+            for index, value in ((gclp_hicon, big), (gclp_hiconsm, small)):
+                if not value:
+                    continue
+                try:
+                    setter = getattr(user32, "SetClassLongPtrW", None) or user32.SetClassLongW
+                    setter.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+                    setter.restype = ctypes.c_void_p
+                    setter(handle, index, ctypes.c_void_p(value))
+                except (AttributeError, OSError, TypeError):
+                    pass
+        time.sleep(0.5)
+
+
 def open_native_window() -> None:
     import threading
 
     import webview
 
-    def apply_window_icon() -> None:
-        try:
-            import win32api
-            import win32con
-            import win32gui
-
-            handle = None
-            for _ in range(100):
-                handle = win32gui.FindWindow(None, TITLE)
-                if handle:
-                    break
-                time.sleep(0.1)
-            if not handle:
-                return
-            flags = win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE
-            big = win32api.LoadImage(0, str(ICON), win32con.IMAGE_ICON, 0, 0, flags)
-            small = win32api.LoadImage(
-                0, str(ICON), win32con.IMAGE_ICON, 16, 16, win32con.LR_LOADFROMFILE
-            )
-            # Keep references alive so the handles are not garbage collected.
-            setattr(apply_window_icon, "_icons", (big, small))
-            if big:
-                win32gui.SendMessage(handle, win32con.WM_SETICON, win32con.ICON_BIG, big)
-            if small:
-                win32gui.SendMessage(handle, win32con.WM_SETICON, win32con.ICON_SMALL, small)
-        except Exception:
-            pass
-
-    window = webview.create_window(
+    webview.create_window(
         TITLE,
         URL,
         width=1900,
@@ -167,10 +206,12 @@ def open_native_window() -> None:
         background_color="#f7f4fc",
     )
     threading.Thread(target=apply_window_icon, daemon=True).start()
-    webview.start()
+    # icon 参数在 WinForms 后端就是给窗口设 Icon，比事后 SendMessage 更早生效。
+    webview.start(icon=str(ICON) if ICON.exists() else None)
 
 
 def main() -> None:
+    bind_app_identity()
     try:
         if not ensure_server():
             return

@@ -43,7 +43,7 @@
           </div>
 
           <div id="panel-local" class="source-panel" role="tabpanel" aria-labelledby="tab-local">
-            <button id="browse-button" class="drop-zone" type="button" aria-label="选择视频文件，也可以把视频拖到这里">
+            <button id="browse-button" class="drop-zone" type="button" aria-label="选择视频文件，支持多选，也可以把视频拖到这里">
               <span class="drop-zone-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M12 15.5V4"></path>
@@ -53,13 +53,15 @@
               </span>
               <span class="drop-zone-text">
                 <strong>选择视频文件</strong>
-                <small>点击选择，或把视频拖到这里；支持常见格式，文件只用于本地转写</small>
+                <small>可按住 Ctrl 一次选多个，也可以把多个视频拖到这里；文件只用于本地转写</small>
               </span>
             </button>
-            <div id="local-selection" class="selection-result" hidden>
-              <span class="selection-label">已选择</span>
-              <strong id="local-title"></strong>
-              <span id="local-path" class="path-text"></span>
+            <div id="local-selection" class="selection-result selection-result-column" hidden>
+              <div class="selection-head">
+                <span class="selection-label" id="local-count">已选择</span>
+                <button id="local-clear" class="link-button" type="button">清空</button>
+              </div>
+              <ul id="local-list" class="pick-list"></ul>
             </div>
           </div>
 
@@ -76,8 +78,15 @@
                 <strong id="bilibili-title"></strong>
               </div>
               <div class="entry-field">
-                <label class="field-label" for="bilibili-entry">选择分P</label>
-                <select id="bilibili-entry" class="input"></select>
+                <div class="entry-head">
+                  <span class="field-label">选择分P<span id="bilibili-count" class="entry-count"></span></span>
+                  <span class="entry-actions">
+                    <button id="bilibili-select-all" class="link-button" type="button">全选</button>
+                    <button id="bilibili-clear" class="link-button" type="button">清空</button>
+                  </span>
+                </div>
+                <div id="bilibili-entries" class="pick-list is-scroll" role="group" aria-label="分P列表"></div>
+                <p class="field-help">可勾选多集：每一集各生成一份笔记，后台会按这台机器的能力排队。</p>
               </div>
             </div>
           </div>
@@ -376,6 +385,19 @@
             <button id="save-general" class="button button-primary" type="submit" disabled>保存通用设置</button>
           </div>
         </form>
+      </section>
+
+      <section class="settings-section" aria-labelledby="system-heading">
+        <div class="settings-section-heading">
+          <div>
+            <h3 id="system-heading">运行能力</h3>
+            <p>批量生成时按这台机器的实际能力自动排队，不需要手动配置。</p>
+          </div>
+          <span id="system-badge" class="config-badge">检测中</span>
+        </div>
+        <p id="system-summary" class="field-help">正在检测 CPU、内存和显卡…</p>
+        <ul id="system-slots" class="system-slots"></ul>
+        <p class="field-help">转写会吃满显卡或大部分 CPU 核心，所以固定一次只跑一集；下载、截帧和调用模型分别有各自的并发上限，前面排满时任务会显示「排队中」，不会把机器拖到卡死。</p>
       </section>
 
       <section class="settings-section" aria-labelledby="api-settings-heading">

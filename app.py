@@ -19,9 +19,11 @@ from study_buddy.config import BASE_DIR, SettingsManager
 from study_buddy.courses import auto_group, parse_sequence
 from study_buddy.db import MISC_COURSE_ID, Database
 from study_buddy.build_info import build_id
+from study_buddy.hardware import profile as hardware_profile
 from study_buddy.jobs import JobManager
 from study_buddy.schemas import (
     ApiSettings,
+    BatchJobCreate,
     BilibiliInfoRequest,
     CourseCreate,
     CourseRename,
@@ -31,6 +33,7 @@ from study_buddy.schemas import (
 )
 from study_buddy.sources import BilibiliClient, SourceError, ffmpeg_executable, validate_local_video
 from study_buddy.summarizer import OpenAICompatibleProvider, SummaryService
+from study_buddy.transcription import cuda_available
 
 settings = SettingsManager()
 database = Database()
@@ -89,7 +92,7 @@ def health() -> dict:
         "version": __version__,
         "build": BUILD_ID,
         "ffmpeg": ffmpeg_executable(),
-        "features": ["questions", "question_stats"],
+        "features": ["questions", "question_stats", "batch", "system"],
     }
 
 
@@ -160,17 +163,18 @@ def test_api() -> dict:
         raise error_http(exc) from exc
 
 
-def choose_local_file() -> dict:
+def choose_local_file(multiple: bool = False) -> dict:
     if sys.platform != "win32":
         raise SourceError("当前系统请直接在任务链接中填写视频路径。")
     script = (
         "Add-Type -AssemblyName System.Windows.Forms; "
         "$dialog = New-Object System.Windows.Forms.OpenFileDialog; "
-        "$dialog.Title = '选择学习视频'; "
+        "$dialog.Title = '选择学习视频（可按住 Ctrl 多选）'; "
+        f"$dialog.Multiselect = ${'true' if multiple else 'false'}; "
         "$dialog.Filter = '视频文件|*.mp4;*.mkv;*.mov;*.avi;*.flv;*.wmv;*.m4v;*.webm;*.ts'; "
         "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { "
         "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-        "[Console]::Write($dialog.FileName) }"
+        "[Console]::Write(($dialog.FileNames -join \"`n\")) }"
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-STA", "-Command", script],
@@ -182,14 +186,23 @@ def choose_local_file() -> dict:
     value = result.stdout.decode("utf-8-sig", errors="replace").strip()
     if not value:
         return {"cancelled": True}
-    path = validate_local_video(value)
-    return {"cancelled": False, "path": str(path), "title": path.stem}
+    files = []
+    for line in value.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        path = validate_local_video(line)
+        files.append({"path": str(path), "title": path.stem})
+    if not files:
+        return {"cancelled": True}
+    # path / title 保留给旧前端：单文件时它们就是唯一那一项。
+    return {"cancelled": False, "files": files, "path": files[0]["path"], "title": files[0]["title"]}
 
 
 @app.post("/api/videos/browse")
-async def browse_video() -> dict:
+async def browse_video(multiple: bool = False) -> dict:
     try:
-        return await asyncio.to_thread(choose_local_file)
+        return await asyncio.to_thread(choose_local_file, multiple)
     except (SourceError, subprocess.TimeoutExpired) as exc:
         raise error_http(exc) from exc
 
@@ -209,6 +222,37 @@ async def create_job(payload: JobCreate) -> dict:
         return {"job": job, "reused": reused}
     except (SourceError, ValueError) as exc:
         raise error_http(exc) from exc
+
+
+@app.post("/api/jobs/batch")
+async def create_jobs(payload: BatchJobCreate) -> dict:
+    """批量提交：逐个建任务，单个失败不影响其余。
+
+    并发不在这里控制：每个任务自己按阶段去抢闸门（见 JobManager._pipeline），
+    这里只负责把「哪些建成了、哪些是复用的、哪些失败」如实回给界面。
+    """
+    created: list[dict] = []
+    reused: list[dict] = []
+    errors: list[dict] = []
+    for index, item in enumerate(payload.items):
+        try:
+            job, was_reused = await jobs.create(item)
+        except (SourceError, ValueError) as exc:
+            errors.append(
+                {
+                    "index": index,
+                    "title": item.title or item.source_ref,
+                    "message": str(exc),
+                }
+            )
+            continue
+        (reused if was_reused else created).append(job)
+    return {
+        "jobs": created + reused,
+        "created": len(created),
+        "reused": len(reused),
+        "errors": errors,
+    }
 
 
 @app.patch("/api/jobs/{job_id}")
@@ -296,6 +340,33 @@ def get_course(course_id: str) -> dict:
 @app.get("/api/jobs")
 def list_jobs() -> dict:
     return {"jobs": database.list_jobs()}
+
+
+@app.get("/api/system")
+def system_profile() -> dict:
+    """批量生成用的并发策略：给用户看清楚「为什么这样排队」。"""
+    profile = hardware_profile()
+    config = settings.get()
+    cuda = False
+    try:
+        cuda = cuda_available()
+    except Exception:  # 组件缺失时只是展示为不可用，不影响应用
+        cuda = False
+    return {
+        "hardware": profile.as_dict(),
+        "slots": {
+            "prepare": profile.prepare_slots,
+            "transcribe": profile.transcribe_slots,
+            "summarize": profile.summarize_slots,
+        },
+        "max_batch": profile.max_batch,
+        "whisper": {
+            "model": config.get("whisper_model", "small"),
+            "device": config.get("whisper_device", "cpu"),
+            "compute_type": config.get("whisper_compute_type", "int8"),
+            "cuda_available": cuda,
+        },
+    }
 
 
 @app.get("/api/jobs/{job_id}")

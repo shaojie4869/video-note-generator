@@ -601,6 +601,141 @@ select.input {
   width: 100%;
 }
 
+/* ---------- 待生成列表（本地多选 / B站分P 多选） ---------- */
+.selection-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.link-button {
+  flex: none;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--primary);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.link-button:hover {
+  background: rgba(139, 92, 246, 0.1);
+}
+
+.entry-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.entry-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.entry-count {
+  margin-left: 4px;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.pick-list {
+  display: flex;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  gap: 4px;
+  list-style: none;
+}
+
+.pick-list.is-scroll {
+  max-height: 208px;
+  padding-right: 4px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.pick-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.pick-item.pick-check {
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.pick-item.pick-check:hover {
+  border-color: #cdbcf2;
+  background: #faf8ff;
+}
+
+.pick-item input[type="checkbox"] {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+
+.pick-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pick-title {
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-path {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-remove {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pick-remove:hover {
+  border-color: var(--danger-soft);
+  color: var(--danger);
+}
+
 .workspace {
   display: grid;
   margin-top: 22px;
@@ -1676,6 +1811,39 @@ select.input {
   background: var(--success-soft);
 }
 
+/* 运行能力：只读展示，告诉用户批量任务为什么这样排队 */
+.system-slots {
+  display: flex;
+  margin: 12px 0 0;
+  padding: 0;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+}
+
+.system-slots li {
+  display: flex;
+  padding: 7px 10px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fbfafd;
+  font-size: 12px;
+}
+
+.system-slot-name {
+  flex: none;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.system-slot-value {
+  color: var(--text);
+  text-align: right;
+}
+
 .engine-options {
   display: grid;
   margin: 0 0 14px;
@@ -2573,6 +2741,13 @@ select.input {
 .records-title {
   color: var(--text);
   overflow-wrap: anywhere;
+}
+
+.records-stage {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 10.5px;
 }
 
 .records-num {

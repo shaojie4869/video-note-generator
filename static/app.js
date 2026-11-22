@@ -20,8 +20,11 @@ const PROVIDER_LABELS = {
 
 const state = {
   sourceType: 'local',
-  local: { path: '', title: '' },
-  bilibili: { info: null, infoUrl: '', entryIndex: 0 },
+  // 本地支持一次选多个文件；每一项 {path, title}
+  local: { files: [] },
+  // selected 存分P 的 index（0 基），批量生成时每一项各建一个任务
+  bilibili: { info: null, infoUrl: '', selected: new Set() },
+  system: null,
   jobs: [],
   courses: [],
   // 右侧当前显示哪个视图：home / course / job / records
@@ -70,8 +73,9 @@ function init() {
   const ids = [
     'settings-open', 'settings-dialog', 'settings-close',
     'tab-local', 'tab-bilibili', 'panel-local', 'panel-bilibili',
-    'browse-button', 'local-selection', 'local-title', 'local-path',
-    'bilibili-url', 'bilibili-info-button', 'bilibili-result', 'bilibili-title', 'bilibili-entry',
+    'browse-button', 'local-selection', 'local-count', 'local-list', 'local-clear',
+    'bilibili-url', 'bilibili-info-button', 'bilibili-result', 'bilibili-title', 'bilibili-count',
+    'bilibili-entries', 'bilibili-select-all', 'bilibili-clear',
     'source-hint', 'start-button', 'course-count', 'course-refresh-status', 'course-empty', 'course-list',
     'course-select', 'course-new', 'course-hint', 'records-open', 'records-entry-meta',
     'course-view', 'course-title', 'course-meta', 'course-more', 'course-active', 'course-notes', 'course-notes-empty',
@@ -87,6 +91,7 @@ function init() {
     'general-form', 'frames-enabled', 'frame-interval', 'max-frames', 'deep-refine', 'exam-mode', 'whisper-model',
     'whisper-device', 'whisper-compute-type', 'chunk-chars', 'save-general', 'general-status',
     'api-form', 'api-configured', 'api-base-url', 'api-model', 'api-vision-model', 'api-reasoning-effort', 'api-key', 'fetch-models', 'models-status', 'model-toggle', 'model-menu', 'vision-toggle', 'vision-menu', 'save-api', 'test-api', 'api-status',
+    'system-badge', 'system-summary', 'system-slots',
     'toast-region'
   ];
   ids.forEach((id) => {
@@ -99,6 +104,7 @@ function init() {
   refreshCourses({ initial: true });
   refreshJobs({ initial: true });
   checkBackendFeatures();
+  loadSystemProfile();
   window.setInterval(() => {
     refreshJobs();
     refreshCourses();
@@ -140,6 +146,7 @@ function bindEvents() {
   });
 
   elements.browseButton.addEventListener('click', browseLocalVideo);
+  elements.localClear.addEventListener('click', clearLocalFiles);
   setupVideoDrop();
   elements.bilibiliInfoButton.addEventListener('click', readBilibiliInfo);
   elements.bilibiliUrl.addEventListener('input', handleBilibiliUrlChange);
@@ -149,11 +156,9 @@ function bindEvents() {
       readBilibiliInfo();
     }
   });
-  elements.bilibiliEntry.addEventListener('change', () => {
-    state.bilibili.entryIndex = Number(elements.bilibiliEntry.value);
-    updateStartState();
-    suggestCourse();
-  });
+  elements.bilibiliSelectAll.addEventListener('click', () => setAllBilibiliEntries(true));
+  elements.bilibiliClear.addEventListener('click', () => setAllBilibiliEntries(false));
+  elements.bilibiliEntries.addEventListener('change', handleBilibiliEntryChange);
   elements.startButton.addEventListener('click', startNewJob);
   elements.courseNew.addEventListener('click', beginNewCourse);
   elements.recordsOpen.addEventListener('click', openRecords);
@@ -235,21 +240,59 @@ function switchSource(type) {
   updateStartState();
 }
 
+// 一次最多排这么多，和后端 BatchJobCreate 的上限保持一致
+const MAX_BATCH = 30;
+
 function browseLocalVideo() {
   withBusy(elements.browseButton, async () => {
-    const result = await api('/api/videos/browse', { method: 'POST' });
+    const result = await api('/api/videos/browse?multiple=1', { method: 'POST' });
     if (result.cancelled) {
       showToast('已取消选择视频。', 'info');
       return;
     }
-    if (!result.path) {
+    const files = Array.isArray(result.files) && result.files.length
+      ? result.files
+      : (result.path ? [{ path: result.path, title: result.title }] : []);
+    if (!files.length) {
       throw new ApiError('未获取到有效的视频路径。');
     }
-    state.local.path = result.path;
-    state.local.title = result.title || '本地视频';
-    renderLocalSelection();
-    showToast('视频已选择，点击“开始生成总结”后才会开始处理。', 'success');
+    addLocalFiles(files);
   });
+}
+
+function addLocalFiles(files) {
+  const known = new Set(state.local.files.map((item) => item.path));
+  const added = [];
+  files.forEach((file) => {
+    if (!file || !file.path || known.has(file.path)) {
+      return;
+    }
+    known.add(file.path);
+    added.push({ path: file.path, title: file.title || fileBaseName(file.path) });
+  });
+  if (!added.length) {
+    showToast('这些视频已经在待生成列表里了。', 'info');
+    return;
+  }
+  state.local.files = state.local.files.concat(added);
+  if (state.local.files.length > MAX_BATCH) {
+    const dropped = state.local.files.length - MAX_BATCH;
+    state.local.files = state.local.files.slice(0, MAX_BATCH);
+    showToast(`一次最多排 ${MAX_BATCH} 个，已忽略多出来的 ${dropped} 个。`, 'info');
+  }
+  renderLocalSelection();
+  const total = state.local.files.length;
+  showToast(
+    total > 1
+      ? `已加入 ${added.length} 个视频，共 ${total} 个待生成；点「批量生成」后才会开始处理。`
+      : '视频已选择，点击“开始生成总结”后才会开始处理。',
+    'success'
+  );
+}
+
+function clearLocalFiles() {
+  state.local.files = [];
+  renderLocalSelection();
 }
 
 function setupVideoDrop() {
@@ -271,40 +314,45 @@ function handleVideoDrop(event) {
   if (state.sourceType !== 'local' || elements.browseButton.disabled) {
     return;
   }
-  const path = droppedFilePath(event);
-  if (!path) {
+  const paths = droppedFilePaths(event);
+  if (!paths.length) {
     showToast('无法读取拖入文件的路径，请点击此处选择视频。', 'info');
     return;
   }
-  state.local.path = path;
-  state.local.title = fileBaseName(path);
-  renderLocalSelection();
-  showToast('视频已选择，点击“开始生成总结”后才会开始处理。', 'success');
+  addLocalFiles(paths.map((path) => ({ path, title: fileBaseName(path) })));
 }
 
-function droppedFilePath(event) {
+function droppedFilePaths(event) {
   const transfer = event.dataTransfer;
   if (!transfer) {
-    return '';
+    return [];
   }
-  const files = transfer.files;
-  if (files && files.length) {
-    const direct = files[0].path;
-    if (typeof direct === 'string' && direct) {
-      return direct;
+  const paths = [];
+  const push = (value) => {
+    if (value && !paths.includes(value)) {
+      paths.push(value);
     }
-  }
+  };
   const listed = transfer.getData('text/uri-list') || transfer.getData('text/plain') || '';
-  const first = listed.split(/\r?\n/).find((line) => line && !line.startsWith('#'));
-  if (first && first.startsWith('file://')) {
-    try {
-      const path = decodeURIComponent(new URL(first).pathname).replace(/^\//, '');
-      return path.replace(/\//g, '\\');
-    } catch (error) {
-      return '';
+  listed.split(/\r?\n/).forEach((line) => {
+    if (!line || line.startsWith('#') || !line.startsWith('file://')) {
+      return;
     }
+    try {
+      const path = decodeURIComponent(new URL(line).pathname).replace(/^\//, '');
+      push(path.replace(/\//g, '\\'));
+    } catch (error) {
+      // 解析失败的这一行直接跳过，其他文件仍然可以加入
+    }
+  });
+  if (transfer.files) {
+    Array.from(transfer.files).forEach((file) => {
+      if (typeof file.path === 'string' && file.path) {
+        push(file.path);
+      }
+    });
   }
-  return '';
+  return paths;
 }
 
 function fileBaseName(path) {
@@ -313,11 +361,37 @@ function fileBaseName(path) {
 }
 
 function renderLocalSelection() {
-  const hasSelection = Boolean(state.local.path);
-  elements.localSelection.hidden = !hasSelection;
-  elements.localTitle.textContent = state.local.title;
-  elements.localPath.textContent = state.local.path;
-  elements.localPath.title = state.local.path;
+  const files = state.local.files;
+  elements.localSelection.hidden = files.length === 0;
+  elements.localCount.textContent = files.length ? `已选择 ${files.length} 个视频` : '';
+  const fragment = document.createDocumentFragment();
+  files.forEach((file, index) => {
+    const item = document.createElement('li');
+    item.className = 'pick-item';
+    const text = document.createElement('div');
+    text.className = 'pick-text';
+    const title = document.createElement('span');
+    title.className = 'pick-title';
+    title.textContent = file.title;
+    const path = document.createElement('span');
+    path.className = 'pick-path';
+    path.textContent = file.path;
+    path.title = file.path;
+    text.append(title, path);
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'pick-remove';
+    remove.textContent = '×';
+    remove.title = '从这个视频移除';
+    remove.setAttribute('aria-label', `移除 ${file.title}`);
+    remove.addEventListener('click', () => {
+      state.local.files.splice(index, 1);
+      renderLocalSelection();
+    });
+    item.append(text, remove);
+    fragment.appendChild(item);
+  });
+  elements.localList.replaceChildren(fragment);
   updateStartState();
   suggestCourse();
 }
@@ -348,139 +422,257 @@ function readBilibiliInfo() {
     }
     state.bilibili.info = info;
     state.bilibili.infoUrl = url;
-    state.bilibili.entryIndex = Number(info.entries[0].index) || 0;
+    // 默认只勾第一集：整门课几十集一次全排上，多数人并不想要。
+    state.bilibili.selected = new Set([bilibiliEntryIndex(info.entries[0], 0)]);
     renderBilibiliInfo();
     showToast('视频信息读取成功，尚未创建任务。', 'success');
   });
+}
+
+function bilibiliEntryIndex(entry, position) {
+  return Number.isFinite(Number(entry && entry.index)) ? Number(entry.index) : position;
+}
+
+function selectedBilibiliEntries() {
+  const info = state.bilibili.info;
+  if (!info || !Array.isArray(info.entries)) {
+    return [];
+  }
+  return info.entries.filter((entry, position) => (
+    state.bilibili.selected.has(bilibiliEntryIndex(entry, position))
+  ));
 }
 
 function renderBilibiliInfo() {
   const info = state.bilibili.info;
   const hasInfo = Boolean(info && Array.isArray(info.entries) && info.entries.length);
   elements.bilibiliResult.hidden = !hasInfo;
-  elements.bilibiliEntry.replaceChildren();
+  elements.bilibiliEntries.replaceChildren();
   if (!hasInfo) {
+    state.bilibili.selected = new Set();
+    updateBilibiliCount();
     updateStartState();
     return;
   }
 
   elements.bilibiliTitle.textContent = info.title || 'B站课程';
+  const fragment = document.createDocumentFragment();
   info.entries.forEach((entry, position) => {
-    const option = document.createElement('option');
-    const entryIndex = Number.isFinite(Number(entry.index)) ? Number(entry.index) : position;
-    option.value = String(entryIndex);
+    const index = bilibiliEntryIndex(entry, position);
+    const item = document.createElement('label');
+    item.className = 'pick-item pick-check';
+
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.value = String(index);
+    box.checked = state.bilibili.selected.has(index);
+
+    const text = document.createElement('span');
+    text.className = 'pick-text';
+    const title = document.createElement('span');
+    title.className = 'pick-title';
+    title.textContent = `P${position + 1} · ${entry.title || `分P ${position + 1}`}`;
+    text.appendChild(title);
     const duration = formatDuration(entry.duration);
-    option.textContent = `P${position + 1} · ${entry.title || `分P ${position + 1}`}${duration ? ` · ${duration}` : ''}`;
-    elements.bilibiliEntry.appendChild(option);
+    if (duration) {
+      const meta = document.createElement('span');
+      meta.className = 'pick-path';
+      meta.textContent = duration;
+      text.appendChild(meta);
+    }
+
+    item.append(box, text);
+    fragment.appendChild(item);
   });
-  const available = info.entries.some((entry, position) => {
-    const entryIndex = Number.isFinite(Number(entry.index)) ? Number(entry.index) : position;
-    return entryIndex === state.bilibili.entryIndex;
-  });
-  if (!available) {
-    state.bilibili.entryIndex = Number(info.entries[0].value || info.entries[0].index) || 0;
-  }
-  elements.bilibiliEntry.value = String(state.bilibili.entryIndex);
+  elements.bilibiliEntries.replaceChildren(fragment);
+  updateBilibiliCount();
   updateStartState();
   suggestCourse();
 }
 
-function updateStartState() {
-  let canStart = false;
-  if (state.sourceType === 'local') {
-    canStart = Boolean(state.local.path);
-    elements.sourceHint.textContent = canStart
-      ? `已选择《${state.local.title}》，点击按钮开始转写和总结。`
-      : '请先选择一个本地视频文件。';
-  } else {
-    const info = state.bilibili.info;
-    canStart = Boolean(
-      info && info.entries && info.entries.length &&
-      elements.bilibiliUrl.value.trim() === state.bilibili.infoUrl
-    );
-    if (canStart) {
-      const entry = info.entries.find((item, position) => {
-        const index = Number.isFinite(Number(item.index)) ? Number(item.index) : position;
-        return index === state.bilibili.entryIndex;
-      });
-      elements.sourceHint.textContent = `将总结《${entry && entry.title ? entry.title : info.title}》，点击按钮后才会开始处理。`;
-    } else {
-      elements.sourceHint.textContent = '请先输入链接并读取视频信息。';
+function handleBilibiliEntryChange(event) {
+  const box = event.target.closest('input[type="checkbox"]');
+  if (!box) {
+    return;
+  }
+  const index = Number(box.value);
+  if (box.checked) {
+    if (state.bilibili.selected.size >= MAX_BATCH) {
+      box.checked = false;
+      showToast(`一次最多排 ${MAX_BATCH} 集，可以先取消几集再选。`, 'info');
+      return;
     }
+    state.bilibili.selected.add(index);
+  } else {
+    state.bilibili.selected.delete(index);
   }
-  const sourceBusy = elements.browseButton.dataset.busy === 'true' || elements.bilibiliInfoButton.dataset.busy === 'true';
-  // 选中的视频已经有任务在跑时不许再提交：重复点会并发转写、白烧显卡
-  const running = activeJobForSelection();
-  if (canStart && running) {
-    canStart = false;
-    elements.sourceHint.textContent = `《${running.title || '该视频'}》正在生成中，可在左侧课程里查看进度。`;
-  }
-  setButtonDisabled(elements.startButton, !canStart || sourceBusy);
-  setButtonDisabled(elements.bilibiliInfoButton, !elements.bilibiliUrl.value.trim());
+  updateBilibiliCount();
+  updateStartState();
+  suggestCourse();
 }
 
-// 当前选中的视频是否已有任务在跑（按来源与分P 精确匹配）
-function activeJobForSelection() {
-  const isActive = (job) => ACTIVE_STATUSES.has(job.status);
-  if (state.sourceType === 'local') {
-    if (!state.local.path) {
-      return null;
+function setAllBilibiliEntries(select) {
+  const info = state.bilibili.info;
+  if (!info || !Array.isArray(info.entries)) {
+    return;
+  }
+  if (!select) {
+    state.bilibili.selected = new Set();
+  } else {
+    const all = info.entries.map((entry, position) => bilibiliEntryIndex(entry, position));
+    state.bilibili.selected = new Set(all.slice(0, MAX_BATCH));
+    if (all.length > MAX_BATCH) {
+      showToast(`这门课有 ${all.length} 集，一次最多排 ${MAX_BATCH} 集，已选前 ${MAX_BATCH} 集。`, 'info');
     }
-    return state.jobs.find(
-      (job) => isActive(job) && job.source_type === 'local' && job.source_ref === state.local.path
-    ) || null;
+  }
+  elements.bilibiliEntries.querySelectorAll('input[type="checkbox"]').forEach((box) => {
+    box.checked = state.bilibili.selected.has(Number(box.value));
+  });
+  updateBilibiliCount();
+  updateStartState();
+  suggestCourse();
+}
+
+function updateBilibiliCount() {
+  const info = state.bilibili.info;
+  const total = info && Array.isArray(info.entries) ? info.entries.length : 0;
+  elements.bilibiliCount.textContent = total
+    ? `（已选 ${state.bilibili.selected.size} / ${total}）`
+    : '';
+}
+
+function buildPayloads() {
+  const courseId = elements.courseSelect.value || '';
+  if (state.sourceType === 'local') {
+    return state.local.files.map((file) => ({
+      source_type: 'local',
+      source_ref: file.path,
+      title: file.title,
+      entry_index: 0,
+      force: false,
+      course_id: courseId
+    }));
   }
   const info = state.bilibili.info;
   if (!info) {
-    return null;
+    return [];
   }
-  const bvid = (String(state.bilibili.infoUrl).match(/BV[0-9A-Za-z]{10}/) || [])[0] || '';
-  const entry = Number(state.bilibili.entryIndex || 0);
+  return selectedBilibiliEntries().map((entry) => ({
+    source_type: 'bilibili',
+    source_ref: state.bilibili.infoUrl,
+    title: entry.title || info.title,
+    entry_index: bilibiliEntryIndex(entry, 0),
+    force: false,
+    course_id: courseId
+  }));
+}
+
+// 这个视频是否已有任务在跑（按来源与分P 精确匹配）
+function activeJobFor(payload) {
   return state.jobs.find((job) => {
-    if (!isActive(job) || job.source_type !== 'bilibili') {
+    if (!ACTIVE_STATUSES.has(job.status) || job.source_type !== payload.source_type) {
       return false;
     }
-    if (Number(job.entry_index || 0) !== entry) {
+    if (payload.source_type === 'local') {
+      return job.source_ref === payload.source_ref;
+    }
+    if (Number(job.entry_index || 0) !== Number(payload.entry_index || 0)) {
       return false;
     }
-    return bvid ? String(job.source_ref).includes(bvid) : job.source_ref === state.bilibili.infoUrl;
+    const bvid = (String(payload.source_ref).match(/BV[0-9A-Za-z]{10}/) || [])[0] || '';
+    return bvid ? String(job.source_ref).includes(bvid) : job.source_ref === payload.source_ref;
   }) || null;
 }
 
-function startNewJob() {
-  let payload;
+function updateStartState() {
+  const payloads = buildPayloads();
+  const fresh = payloads.filter((payload) => !activeJobFor(payload));
+  const skipped = payloads.length - fresh.length;
+  const busy = elements.browseButton.dataset.busy === 'true'
+    || elements.bilibiliInfoButton.dataset.busy === 'true';
+
+  let hint = '';
+  let canStart = fresh.length > 0;
   if (state.sourceType === 'local') {
-    if (!state.local.path) {
-      showToast('请先选择本地视频。', 'error');
-      return;
+    if (!state.local.files.length) {
+      hint = '请先选择本地视频文件，可一次选多个。';
+    } else if (!fresh.length) {
+      hint = '已选视频都在生成中，可在左侧课程或生成记录里查看进度。';
+    } else {
+      hint = `已选 ${payloads.length} 个视频，本次生成 ${fresh.length} 个`;
     }
-    payload = {
-      source_type: 'local',
-      source_ref: state.local.path,
-      title: state.local.title,
-      entry_index: 0,
-      force: false,
-      course_id: elements.courseSelect.value || ''
-    };
   } else {
-    if (!state.bilibili.info || elements.bilibiliUrl.value.trim() !== state.bilibili.infoUrl) {
-      showToast('请先读取 B站视频信息。', 'error');
-      return;
+    const info = state.bilibili.info;
+    if (!info) {
+      hint = '请先输入链接并读取视频信息。';
+    } else if (!payloads.length) {
+      hint = '请至少勾选一集分P。';
+    } else if (!fresh.length) {
+      hint = '已勾选的分P都在生成中，可在左侧课程或生成记录里查看进度。';
+    } else {
+      hint = `已勾选 ${payloads.length} 集，本次生成 ${fresh.length} 集`;
     }
-    const selected = state.bilibili.info.entries.find((entry, position) => {
-      const index = Number.isFinite(Number(entry.index)) ? Number(entry.index) : position;
-      return index === state.bilibili.entryIndex;
-    });
-    payload = {
-      source_type: 'bilibili',
-      source_ref: state.bilibili.infoUrl,
-      title: selected && selected.title ? selected.title : state.bilibili.info.title,
-      entry_index: state.bilibili.entryIndex,
-      force: false,
-      course_id: elements.courseSelect.value || ''
-    };
   }
-  createJob(payload, elements.startButton);
+  if (canStart && skipped > 0) {
+    hint += `（${skipped} 个已在生成中，将跳过）`;
+  }
+  if (canStart && fresh.length > 1) {
+    const slots = state.system && state.system.slots;
+    hint += slots
+      ? `。后台按本机能力排队：转写 ${slots.transcribe} 路、画面 ${slots.prepare} 路、笔记 ${slots.summarize} 路`
+      : '。后台会按本机能力自动排队。';
+  } else if (canStart) {
+    hint += '，点击按钮后才会开始处理。';
+  }
+  elements.sourceHint.textContent = hint;
+  elements.startButton.textContent = fresh.length > 1
+    ? `批量生成 ${fresh.length} 个笔记`
+    : '开始生成总结';
+  setButtonDisabled(elements.startButton, !canStart || busy);
+  setButtonDisabled(elements.bilibiliInfoButton, !elements.bilibiliUrl.value.trim());
+}
+
+function startNewJob() {
+  const payloads = buildPayloads().filter((payload) => !activeJobFor(payload));
+  if (!payloads.length) {
+    showToast('没有可生成的视频：请先选择或勾选，且它们当前不在生成中。', 'error');
+    return;
+  }
+  if (payloads.length === 1) {
+    createJob(payloads[0], elements.startButton);
+    return;
+  }
+  createBatch(payloads, elements.startButton);
+}
+
+function createBatch(payloads, button) {
+  withBusy(button, async () => {
+    const items = payloads.slice(0, MAX_BATCH);
+    const result = await api('/api/jobs/batch', {
+      method: 'POST',
+      body: JSON.stringify({ items })
+    });
+    const jobs = Array.isArray(result.jobs) ? result.jobs : [];
+    const errors = Array.isArray(result.errors) ? result.errors : [];
+    if (!jobs.length) {
+      throw new ApiError(errors.length ? errors[0].message : '服务未返回有效的任务信息。');
+    }
+    jobs.forEach(upsertJob);
+    state.selectedId = null;
+    state.currentJob = null;
+    state.detailRequest += 1;
+    clearSourceSelection();
+    await refreshJobs();
+    openRecords();
+    const parts = [`已创建 ${result.created || 0} 个任务`];
+    if (result.reused) {
+      parts.push(`${result.reused} 个已有记录直接复用`);
+    }
+    if (errors.length) {
+      parts.push(`${errors.length} 个失败：${errors[0].message}`);
+    }
+    showToast(parts.join('，'), errors.length ? 'info' : 'success');
+  });
 }
 
 function regenerateSelectedJob() {
@@ -597,12 +789,11 @@ function createJob(payload, button) {
 }
 
 function clearSourceSelection() {
-  state.local = { path: '', title: '' };
+  state.local = { files: [] };
   state.bilibili.info = null;
   state.bilibili.infoUrl = '';
-  state.bilibili.entryIndex = 0;
+  state.bilibili.selected = new Set();
   elements.bilibiliUrl.value = '';
-  elements.bilibiliEntry.value = '0';
   renderLocalSelection();
   renderBilibiliInfo();
   updateStartState();
@@ -1079,8 +1270,9 @@ function openRecords() {
 
 function renderRecords() {
   const jobs = state.jobs;
+  const active = jobs.filter((job) => ACTIVE_STATUSES.has(job.status)).length;
   elements.recordsMeta.textContent = jobs.length
-    ? `共 ${jobs.length} 次生成，按时间倒序`
+    ? `共 ${jobs.length} 次生成${active ? ` · ${active} 个进行中` : ''}，按时间倒序`
     : '还没有生成记录';
   const fragment = document.createDocumentFragment();
   if (jobs.length) {
@@ -1106,6 +1298,13 @@ function renderRecords() {
     const title = document.createElement('span');
     title.className = 'records-title';
     title.textContent = job.title || '未命名任务';
+    // 批量生成时这一列能看出每个任务卡在哪一步（排队 / 转写 / 出笔记）
+    if (ACTIVE_STATUSES.has(job.status) && job.stage) {
+      const stage = document.createElement('span');
+      stage.className = 'records-stage';
+      stage.textContent = job.stage;
+      title.appendChild(stage);
+    }
 
     const cost = document.createElement('span');
     cost.className = 'records-num';
@@ -1451,16 +1650,9 @@ async function suggestCourse() {
   if (!auto) {
     return;
   }
-  const payload =
-    state.sourceType === 'local'
-      ? { source_type: 'local', source_ref: state.local.path, title: state.local.title, entry_index: 0 }
-      : {
-          source_type: 'bilibili',
-          source_ref: state.bilibili.infoUrl,
-          title: '',
-          entry_index: state.bilibili.entryIndex
-        };
-  if (!payload.source_ref) {
+  const payloads = buildPayloads();
+  const payload = payloads[0];
+  if (!payload || !payload.source_ref) {
     auto.textContent = '自动识别';
     return;
   }
@@ -1468,16 +1660,17 @@ async function suggestCourse() {
     const query = new URLSearchParams({
       source_type: payload.source_type,
       source_ref: payload.source_ref,
-      entry_index: String(payload.entry_index),
+      entry_index: String(payload.entry_index || 0),
       title: payload.title || ''
     });
     const result = await api(`/api/courses/suggest?${query.toString()}`);
+    const suffix = payloads.length > 1 ? ` 等 ${payloads.length} 个` : '';
     if (result.course_id) {
       if (elements.courseSelect.value === '') {
         elements.courseSelect.value = result.course_id;
       }
     } else if (result.name) {
-      auto.textContent = `自动：${result.name}`;
+      auto.textContent = `自动：${result.name}${suffix}`;
     } else {
       auto.textContent = '自动：杂项';
     }
@@ -2278,6 +2471,7 @@ async function openSettings() {
   state.config = null;
   clearSensitiveInputs();
   updateSettingsActionStates();
+  renderSystemProfile();
   elements.settingsDialog.showModal();
 
   await withBusy(elements.settingsOpen, async () => {
@@ -2286,6 +2480,72 @@ async function openSettings() {
     populateConfig(config);
     updateSettingsActionStates();
   });
+  loadSystemProfile(true);
+}
+
+/**
+ * 批量生成的并发策略完全由后端按机器能力决定，界面只负责把结论讲清楚，
+ * 免得用户以为是「卡住了」，其实是排在队里。
+ */
+async function loadSystemProfile(force = false) {
+  if (state.system && !force) {
+    return state.system;
+  }
+  try {
+    const result = await api('/api/system');
+    state.system = result;
+    renderSystemProfile();
+    updateStartState();
+    return result;
+  } catch (_error) {
+    // 后端还没更新时接口不存在，页面按「未探测」处理即可
+    return null;
+  }
+}
+
+function renderSystemProfile() {
+  const system = state.system;
+  if (!elements.systemSummary) {
+    return;
+  }
+  if (!system || !system.hardware) {
+    elements.systemSummary.textContent = '正在检测 CPU、内存和显卡…';
+    elements.systemSlots.replaceChildren();
+    setConfigBadge(elements.systemBadge, false, '检测中');
+    return;
+  }
+  const hardware = system.hardware;
+  elements.systemSummary.textContent = hardware.summary || '';
+  setConfigBadge(
+    elements.systemBadge,
+    Boolean(hardware.has_gpu),
+    hardware.has_gpu ? 'GPU 加速可用' : '纯 CPU 运行'
+  );
+  const slots = system.slots || {};
+  const whisper = system.whisper || {};
+  const rows = [
+    ['语音转写', `${slots.transcribe || 1} 路（串行占用显卡/CPU 核心）`],
+    ['下载与画面提取', `${slots.prepare || 1} 路（网络与 ffmpeg）`],
+    ['笔记与出题', `${slots.summarize || 1} 路（等模型返回，不占算力）`],
+    ['单次批量上限', `${system.max_batch || 30} 个视频`],
+    [
+      '当前转写配置',
+      `${whisper.model || 'small'} · ${(whisper.device || 'cpu').toUpperCase()}` +
+        ` · ${whisper.compute_type || 'int8'}` +
+        (whisper.cuda_available ? '（CUDA 已就绪）' : '（未启用 CUDA）')
+    ]
+  ];
+  elements.systemSlots.replaceChildren(...rows.map(([name, value]) => {
+    const item = document.createElement('li');
+    const label = document.createElement('span');
+    label.className = 'system-slot-name';
+    label.textContent = name;
+    const detail = document.createElement('span');
+    detail.className = 'system-slot-value';
+    detail.textContent = value;
+    item.append(label, detail);
+    return item;
+  }));
 }
 
 function populateConfig(config) {

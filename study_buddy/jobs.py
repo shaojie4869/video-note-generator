@@ -4,12 +4,16 @@ import asyncio
 import json
 import logging
 import threading
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from .config import CACHE_DIR, SettingsManager
 from .db import Database
 from .errors import JobCancelled, ProviderError
+from .hardware import HardwareProfile
+from .hardware import profile as hardware_profile
 from .schemas import JobCreate
 from .sources import (
     BilibiliClient,
@@ -29,6 +33,19 @@ BILIBILI_PLACEHOLDER_TITLE = "B站课程"
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class _Media:
+    """一个任务进入「转写」阶段所需的全部素材。
+
+    字幕、下载好的视频、抽出的音轨三者可能只有一部分存在：
+    有字幕就不用转写，不需要画面就不用下载视频。
+    """
+
+    transcript: str = ""
+    video_path: Path | None = None
+    audio_path: Path | None = None
+
+
 class JobManager:
     def __init__(
         self,
@@ -37,6 +54,7 @@ class JobManager:
         summary: SummaryService,
         bilibili: BilibiliClient | None = None,
         transcriber: Transcriber | None = None,
+        hardware: HardwareProfile | None = None,
     ) -> None:
         self.db = database
         self.settings = settings
@@ -45,6 +63,14 @@ class JobManager:
         self.transcriber = transcriber or Transcriber()
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancelled: dict[str, threading.Event] = {}
+        # 批量生成时用三组独立的闸门，而不是「最多跑 N 个任务」：
+        # 各阶段瓶颈不同，串在一条流水线上限流才能真正既不空转、也不过载。
+        self.hardware = hardware or hardware_profile()
+        self._stage_slots: dict[str, asyncio.Semaphore] = {
+            "prepare": asyncio.Semaphore(self.hardware.prepare_slots),
+            "transcribe": asyncio.Semaphore(self.hardware.transcribe_slots),
+            "summarize": asyncio.Semaphore(self.hardware.summarize_slots),
+        }
 
     @staticmethod
     def cache_key(payload: JobCreate) -> str:
@@ -178,7 +204,7 @@ class JobManager:
 
     async def _run_initial(self, job_id: str, event: threading.Event) -> None:
         try:
-            await asyncio.to_thread(self._prepare_transcript, job_id, event)
+            await self._pipeline(job_id, event)
         except JobCancelled:
             self.db.update_job(job_id, status="cancelled", stage="已取消", error="")
         except (SourceError, TranscriptionError, ProviderError, OSError) as exc:
@@ -188,16 +214,93 @@ class JobManager:
         finally:
             self._tasks.pop(job_id, None)
 
-    def _prepare_transcript(self, job_id: str, event: threading.Event) -> None:
+    @asynccontextmanager
+    async def _stage(
+        self, name: str, job_id: str, event: threading.Event, waiting_stage: str
+    ) -> AsyncIterator[None]:
+        """占一个阶段名额；排不到队时把状态如实显示成「排队中」。
+
+        不能用 `async with semaphore` 死等：用户取消一个还在排队的任务时，
+        必须能立刻从等待里醒过来，否则会白占一个名额直到前面的任务跑完。
+        """
+        semaphore = self._stage_slots[name]
+        waited = False
+        while True:
+            try:
+                await asyncio.wait_for(semaphore.acquire(), timeout=0.5)
+                break
+            except asyncio.TimeoutError:
+                if event.is_set():
+                    raise JobCancelled()
+                if not waited:
+                    waited = True
+                    self.db.update_job(job_id, status="queued", stage=waiting_stage)
+        try:
+            if waited:
+                # 具体阶段文案由各阶段自己写，这里只把状态从「等待中」拉回来。
+                self.db.update_job(job_id, status="running")
+            yield
+        finally:
+            semaphore.release()
+
+    async def _pipeline(self, job_id: str, event: threading.Event) -> None:
+        """批量生成时多个任务并行，靠三组闸门控制各阶段的实际占用。"""
         job = self.db.get_job(job_id)
         if not job:
             return
+        frames_enabled = bool(self.settings.get().get("frames_enabled"))
+        async with self._stage("prepare", job_id, event, "排队等待读取视频"):
+            media = await asyncio.to_thread(self._prepare_media, job_id, event)
+        if media.transcript:
+            # 有字幕（或复用旧转写）不必再占显卡，跳过转写名额。
+            transcript = media.transcript
+            self.db.update_job(job_id, status="running", transcript=transcript, progress=65)
+        else:
+            async with self._stage("transcribe", job_id, event, "排队等待转写（显卡正被前面的任务使用）"):
+                transcript = await asyncio.to_thread(self._run_transcription, job_id, media, event)
+            self._check_cancelled(event)
+            self.db.update_job(job_id, transcript=transcript, progress=65)
+        if job.get("visual_notes") and frames_enabled:
+            # 重新生成笔记时复用已识别的画面内容：截图和视觉调用都是重复开销。
+            self.db.update_job(job_id, stage="复用已识别的课件画面", progress=67)
+        else:
+            async with self._stage("prepare", job_id, event, "排队等待课件画面识别"):
+                await asyncio.to_thread(self._prepare_visual, job_id, event, media.video_path)
+        self._check_cancelled(event)
+        async with self._stage("summarize", job_id, event, "排队等待生成笔记"):
+            await asyncio.to_thread(self._summarize, job_id, event)
+
+    def _prepare_transcript(self, job_id: str, event: threading.Event) -> None:
+        """同步版完整流程：单任务、脚本和测试走这条，不经过并发闸门。"""
+        job = self.db.get_job(job_id)
+        if not job:
+            return
+        frames_enabled = bool(self.settings.get().get("frames_enabled"))
+        media = self._prepare_media(job_id, event)
+        transcript = self._run_transcription(job_id, media, event)
+        self._check_cancelled(event)
+        self.db.update_job(job_id, transcript=transcript, progress=65)
+        if job.get("visual_notes") and frames_enabled:
+            # 重新生成笔记时复用已识别的画面内容：截图和视觉调用都是重复开销。
+            self.db.update_job(job_id, stage="复用已识别的课件画面", progress=67)
+        else:
+            self._prepare_visual(job_id, event, media.video_path)
+        self._check_cancelled(event)
+        # 不再按字数暂停等确认：用户点了「开始生成」就是要生成，
+        # 多几万字只影响耗时和 token，不该变成一次额外交互。
+        self._summarize(job_id, event)
+
+    def _prepare_media(self, job_id: str, event: threading.Event) -> _Media:
+        """拿到转写与画面所需的素材：下载、取字幕、抽音轨。"""
+        job = self.db.get_job(job_id)
+        if not job:
+            return _Media()
         config = self.settings.get()
         frames_enabled = bool(config.get("frames_enabled"))
-        video_path: Path | None = None
+        media = _Media()
         if job["transcript"]:
             # 重新生成：转写已存在（复用自失败任务），直接进入总结流程。
-            transcript = job["transcript"]
+            media.transcript = job["transcript"]
             self.db.update_job(job_id, status="running", stage="复用已完成的转写", progress=65)
             if job["source_type"] == "bilibili" and (job.get("title") or "").strip() in {
                 "",
@@ -209,9 +312,9 @@ class JobManager:
                 # 这时必须重新拿到视频，否则重试会静默丢掉整段课件画面。
                 if job["source_type"] == "local":
                     try:
-                        video_path = validate_local_video(job["source_ref"])
+                        media.video_path = validate_local_video(job["source_ref"])
                     except SourceError:
-                        video_path = None
+                        media.video_path = None
                 else:
                     self.db.update_job(job_id, stage="重新下载视频用于截帧", progress=65)
                     self._check_cancelled(event)
@@ -219,7 +322,7 @@ class JobManager:
                         prepared = self.bilibili.prepare(
                             job["source_ref"], job["entry_index"], job_id, want_video=True
                         )
-                        video_path = prepared.media_path
+                        media.video_path = prepared.media_path
                         if prepared.title and (job.get("title") or "").strip() in {
                             "",
                             BILIBILI_PLACEHOLDER_TITLE,
@@ -227,58 +330,61 @@ class JobManager:
                             self.db.update_job(job_id, title=prepared.title)
                     except (SourceError, OSError) as exc:
                         logger.warning("重新下载视频失败，跳过画面信息：%s", exc)
-                        video_path = None
-        else:
-            self.db.update_job(job_id, status="running", stage="正在读取视频", progress=3)
-            self._check_cancelled(event)
-            if job["source_type"] == "local":
-                media_path = validate_local_video(job["source_ref"])
-                prepared = PreparedSource(title=job["title"], media_path=media_path)
-                video_path = media_path if frames_enabled else None
-            else:
-                prepared = self.bilibili.prepare(
-                    job["source_ref"], job["entry_index"], job_id, want_video=frames_enabled
-                )
-                self.db.update_job(job_id, title=prepared.title)
-                if frames_enabled and prepared.media_path and prepared.media_path.suffix.lower() in {
-                    ".mp4", ".mkv", ".mov", ".avi", ".flv", ".wmv", ".m4v", ".webm", ".ts"
-                }:
-                    video_path = prepared.media_path
-            self._check_cancelled(event)
+                        media.video_path = None
+            return media
 
-            if prepared.transcript:
-                transcript = prepared.transcript
-                self.db.update_job(job_id, stage="已读取视频字幕", progress=65)
-            else:
-                self.db.update_job(job_id, stage="正在提取音频", progress=10)
-                audio_path = CACHE_DIR / job_id / "audio.wav"
-                audio_path.parent.mkdir(parents=True, exist_ok=True)
-                extract_audio(prepared.media_path, audio_path)
-                self._check_cancelled(event)
-                self.db.update_job(job_id, stage="正在本地转写（首次需下载模型）", progress=15)
-
-                def transcribe_progress(value: int) -> None:
-                    self.db.update_job(job_id, progress=15 + int(value * 0.45))
-
-                transcript = self.transcriber.transcribe(
-                    audio_path,
-                    config["whisper_model"],
-                    config["whisper_device"],
-                    config["whisper_compute_type"],
-                    transcribe_progress,
-                    event,
-                )
+        self.db.update_job(job_id, status="running", stage="正在读取视频", progress=3)
         self._check_cancelled(event)
-        self.db.update_job(job_id, transcript=transcript, progress=65)
-        if job.get("visual_notes") and frames_enabled:
-            # 重新生成笔记时复用已识别的画面内容：截图和视觉调用都是重复开销。
-            self.db.update_job(job_id, stage="复用已识别的课件画面", progress=67)
+        if job["source_type"] == "local":
+            media_path = validate_local_video(job["source_ref"])
+            prepared = PreparedSource(title=job["title"], media_path=media_path)
+            media.video_path = media_path if frames_enabled else None
         else:
-            self._prepare_visual(job_id, event, video_path)
+            prepared = self.bilibili.prepare(
+                job["source_ref"], job["entry_index"], job_id, want_video=frames_enabled
+            )
+            self.db.update_job(job_id, title=prepared.title)
+            if frames_enabled and prepared.media_path and prepared.media_path.suffix.lower() in {
+                ".mp4", ".mkv", ".mov", ".avi", ".flv", ".wmv", ".m4v", ".webm", ".ts"
+            }:
+                media.video_path = prepared.media_path
         self._check_cancelled(event)
-        # 不再按字数暂停等确认：用户点了「开始生成」就是要生成，
-        # 多几万字只影响耗时和 token，不该变成一次额外交互。
-        self._summarize(job_id, event)
+
+        if prepared.transcript:
+            media.transcript = prepared.transcript
+            self.db.update_job(job_id, stage="已读取视频字幕", progress=65)
+            return media
+
+        self.db.update_job(job_id, stage="正在提取音频", progress=10)
+        audio_path = CACHE_DIR / job_id / "audio.wav"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        extract_audio(prepared.media_path, audio_path)
+        self._check_cancelled(event)
+        media.audio_path = audio_path
+        return media
+
+    def _run_transcription(
+        self, job_id: str, media: _Media, event: threading.Event
+    ) -> str:
+        """真正占用显卡的一步。没有音轨（已有字幕）时直接返回。"""
+        if media.transcript:
+            return media.transcript
+        if media.audio_path is None:
+            raise TranscriptionError("没有可转写的音频，请检查视频音轨。")
+        config = self.settings.get()
+        self.db.update_job(job_id, stage="正在本地转写（首次需下载模型）", progress=15)
+
+        def transcribe_progress(value: int) -> None:
+            self.db.update_job(job_id, progress=15 + int(value * 0.45))
+
+        return self.transcriber.transcribe(
+            media.audio_path,
+            config["whisper_model"],
+            config["whisper_device"],
+            config["whisper_compute_type"],
+            transcribe_progress,
+            event,
+        )
 
     def _prepare_visual(self, job_id: str, event: threading.Event, video_path: Path | None) -> None:
         """截取课件画面并让视觉模型提取其中的知识信息。"""

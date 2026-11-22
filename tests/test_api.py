@@ -42,6 +42,85 @@ def test_job_creation_requires_explicit_post(tmp_path, monkeypatch):
         assert len(client.get("/api/jobs", headers=HEADERS).json()["jobs"]) == 1
 
 
+def test_batch_creates_each_video_and_skips_duplicates(tmp_path, monkeypatch):
+    """批量提交：每个视频一个任务；同一视频重复出现在同一次提交里只留一个。"""
+    monkeypatch.setattr(application.jobs, "_start", lambda *args: None)
+    videos = [tmp_path / "a.mp4", tmp_path / "b.mp4"]
+    for video in videos:
+        video.write_bytes(b"test")
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        response = client.post(
+            "/api/jobs/batch",
+            headers=HEADERS,
+            json={
+                "items": [
+                    {"source_type": "local", "source_ref": str(videos[0]), "title": "1-1 绪论"},
+                    {"source_type": "local", "source_ref": str(videos[1]), "title": "1-2 发展"},
+                    {"source_type": "local", "source_ref": str(videos[0]), "title": "重复提交"},
+                ]
+            },
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["created"] == 2
+        assert body["reused"] == 1
+        assert body["errors"] == []
+        listed = client.get("/api/jobs", headers=HEADERS).json()["jobs"]
+        ours = [
+            job for job in listed
+            if job["source_ref"] in {str(videos[0]), str(videos[1])}
+        ]
+        assert len(ours) == 2
+        for job in ours:
+            client.delete(f"/api/jobs/{job['id']}", headers=HEADERS)
+
+
+def test_batch_reports_single_failure_without_dropping_others(tmp_path, monkeypatch):
+    monkeypatch.setattr(application.jobs, "_start", lambda *args: None)
+    video = tmp_path / "good.mp4"
+    video.write_bytes(b"test")
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        body = client.post(
+            "/api/jobs/batch",
+            headers=HEADERS,
+            json={
+                "items": [
+                    {"source_type": "local", "source_ref": str(video), "title": "正常"},
+                    {"source_type": "local", "source_ref": str(tmp_path / "missing.mp4"), "title": "不存在"},
+                ]
+            },
+        ).json()
+        assert body["created"] == 1
+        assert len(body["errors"]) == 1
+        assert body["errors"][0]["index"] == 1
+        listed = client.get("/api/jobs", headers=HEADERS).json()["jobs"]
+        for job in listed:
+            if job["source_ref"] == str(video):
+                client.delete(f"/api/jobs/{job['id']}", headers=HEADERS)
+
+
+def test_system_profile_exposes_concurrency_plan():
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        data = client.get("/api/system", headers=HEADERS).json()
+        assert data["hardware"]["cpu_count"] >= 1
+        assert data["slots"]["transcribe"] == 1
+        assert data["slots"]["summarize"] >= 1
+        assert data["max_batch"] == 30
+        assert "model" in data["whisper"]
+
+
+def test_batch_rejects_empty_or_oversized_payload():
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        empty = client.post("/api/jobs/batch", headers=HEADERS, json={"items": []})
+        assert empty.status_code == 422
+        oversized = client.post(
+            "/api/jobs/batch",
+            headers=HEADERS,
+            json={"items": [{"source_type": "local", "source_ref": "D:/a.mp4"}] * 31},
+        )
+        assert oversized.status_code == 422
+
+
 def test_rename_job_validates_and_updates_title(tmp_path, monkeypatch):
     monkeypatch.setattr(application.jobs, "_start", lambda *args: None)
     video = tmp_path / "lesson.mp4"

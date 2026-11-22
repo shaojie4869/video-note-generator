@@ -39,6 +39,12 @@ class JobCreate(BaseModel):
     course_id: str = ""
 
 
+class BatchJobCreate(BaseModel):
+    """批量生成：一次提交多个视频，后台按机器能力排队跑。"""
+
+    items: list[JobCreate] = Field(min_length=1, max_length=30)
+
+
 class CourseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
