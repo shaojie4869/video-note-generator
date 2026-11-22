@@ -460,7 +460,6 @@ function startNewJob() {
       title: state.local.title,
       entry_index: 0,
       force: false,
-      confirm_long: false,
       course_id: elements.courseSelect.value || ''
     };
   } else {
@@ -478,7 +477,6 @@ function startNewJob() {
       title: selected && selected.title ? selected.title : state.bilibili.info.title,
       entry_index: state.bilibili.entryIndex,
       force: false,
-      confirm_long: false,
       course_id: elements.courseSelect.value || ''
     };
   }
@@ -496,7 +494,6 @@ function regenerateSelectedJob() {
     title: job.title,
     entry_index: Number(job.entry_index) || 0,
     force: true,
-    confirm_long: false
   }, elements.regenerateJob);
 }
 

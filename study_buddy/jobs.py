@@ -23,8 +23,6 @@ from .sources import (
 from .summarizer import OpenAICompatibleProvider, SummaryService
 from .transcription import Transcriber, TranscriptionError
 
-LONG_TRANSCRIPT_THRESHOLD = 50000
-
 # 任务创建时还没有解析出真实标题，B 站任务先用这个占位。
 BILIBILI_PLACEHOLDER_TITLE = "B站课程"
 
@@ -102,18 +100,26 @@ class JobManager:
                 await asyncio.to_thread(
                     self.db.update_job, job["id"], transcript=reusable["transcript"]
                 )
-        self._start(job["id"], False, payload.confirm_long if hasattr(payload, "confirm_long") else False)
+        self._start(job["id"], False)
         return self.db.get_job(job["id"]), False
 
-    def _start(self, job_id: str, summary_only: bool, confirm_long: bool = False) -> None:
+    def _start(self, job_id: str, summary_only: bool) -> None:
         if job_id in self._tasks and not self._tasks[job_id].done():
             raise ValueError("该任务正在运行。")
         event = self._cancelled.setdefault(job_id, threading.Event())
         event.clear()
-        coroutine = self._run_summary_only(job_id, event) if summary_only else self._run_initial(job_id, event, confirm_long)
+        coroutine = (
+            self._run_summary_only(job_id, event)
+            if summary_only
+            else self._run_initial(job_id, event)
+        )
         self._tasks[job_id] = asyncio.create_task(coroutine)
 
     async def confirm(self, job_id: str) -> dict[str, Any]:
+        """兼容旧任务：早期版本遇到超长转写会停在「待确认」，现在只负责把它放行。
+
+        新任务不再进入这个状态（见 _prepare_transcript），但库里已有的任务还要能继续。
+        """
         job = self.db.get_job(job_id)
         if not job:
             raise KeyError("任务不存在。")
@@ -126,7 +132,7 @@ class JobManager:
         if not job or job["status"] != "waiting_confirmation":
             raise ValueError("任务状态已变化，请刷新后重试。")
         self.db.update_job(job_id, status="queued", stage="已确认，等待总结", error="")
-        self._start(job_id, True, True)
+        self._start(job_id, True)
         return self.db.get_job(job_id)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
@@ -170,9 +176,9 @@ class JobManager:
         if title and title != job.get("title"):
             self.db.update_job(job_id, title=title)
 
-    async def _run_initial(self, job_id: str, event: threading.Event, confirm_long: bool) -> None:
+    async def _run_initial(self, job_id: str, event: threading.Event) -> None:
         try:
-            await asyncio.to_thread(self._prepare_transcript, job_id, event, confirm_long)
+            await asyncio.to_thread(self._prepare_transcript, job_id, event)
         except JobCancelled:
             self.db.update_job(job_id, status="cancelled", stage="已取消", error="")
         except (SourceError, TranscriptionError, ProviderError, OSError) as exc:
@@ -182,7 +188,7 @@ class JobManager:
         finally:
             self._tasks.pop(job_id, None)
 
-    def _prepare_transcript(self, job_id: str, event: threading.Event, confirm_long: bool) -> None:
+    def _prepare_transcript(self, job_id: str, event: threading.Event) -> None:
         job = self.db.get_job(job_id)
         if not job:
             return
@@ -270,13 +276,8 @@ class JobManager:
         else:
             self._prepare_visual(job_id, event, video_path)
         self._check_cancelled(event)
-        if len(transcript) > LONG_TRANSCRIPT_THRESHOLD and not confirm_long:
-            self.db.update_job(
-                job_id,
-                status="waiting_confirmation",
-                stage=f"转写完成，共 {len(transcript)} 字，等待确认总结",
-            )
-            return
+        # 不再按字数暂停等确认：用户点了「开始生成」就是要生成，
+        # 多几万字只影响耗时和 token，不该变成一次额外交互。
         self._summarize(job_id, event)
 
     def _prepare_visual(self, job_id: str, event: threading.Event, video_path: Path | None) -> None:

@@ -35,7 +35,6 @@ class JobCreate(BaseModel):
     title: str | None = None
     entry_index: int = Field(default=0, ge=0)
     force: bool = False
-    confirm_long: bool = False
     # 生成前指定的课程；留空表示交给自动归组
     course_id: str = ""
 

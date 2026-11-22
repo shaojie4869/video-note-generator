@@ -1,8 +1,30 @@
 import asyncio
+import threading
 
 from study_buddy.db import Database
 from study_buddy.jobs import JobManager
 from study_buddy.schemas import JobCreate
+
+
+class StubSettings:
+    def get(self):
+        return {"frames_enabled": False}
+
+
+def test_long_transcript_goes_straight_to_summary(tmp_path):
+    """超过 5 万字也不再停下来等确认——用户点了开始就是要生成。"""
+    database = Database(tmp_path / "history.db")
+    manager = JobManager(database, settings=StubSettings(), summary=None)
+    job = database.create_job("local", "D:/a.mp4", "长课", "key", 0)
+    database.update_job(job["id"], transcript="字" * 60000)
+
+    summarized = []
+    manager._summarize = lambda job_id, event: summarized.append(job_id)
+
+    manager._prepare_transcript(job["id"], threading.Event())
+
+    assert summarized == [job["id"]]
+    assert database.get_job(job["id"])["status"] != "waiting_confirmation"
 
 
 def test_confirm_waits_for_previous_task_before_start(tmp_path):
@@ -18,7 +40,7 @@ def test_confirm_waits_for_previous_task_before_start(tmp_path):
         result = await manager.confirm(job["id"])
         assert previous.done()
         assert result["status"] == "queued"
-        assert started == [(job["id"], True, True)]
+        assert started == [(job["id"], True)]
 
     asyncio.run(scenario())
 
