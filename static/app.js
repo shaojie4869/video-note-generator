@@ -73,6 +73,7 @@ function init() {
   const ids = [
     'settings-open', 'settings-dialog', 'settings-close',
     'tab-local', 'tab-bilibili', 'panel-local', 'panel-bilibili',
+    'source-card', 'source-toggle',
     'browse-button', 'local-selection', 'local-count', 'local-list', 'local-clear',
     'bilibili-url', 'bilibili-info-button', 'bilibili-result', 'bilibili-title', 'bilibili-count',
     'bilibili-entries', 'bilibili-select-all', 'bilibili-clear',
@@ -146,6 +147,9 @@ function bindEvents() {
   });
 
   elements.browseButton.addEventListener('click', browseLocalVideo);
+  elements.sourceToggle.addEventListener('click', () => {
+    setSourceCollapsed(!elements.sourceCard.classList.contains('is-collapsed'));
+  });
   elements.localClear.addEventListener('click', clearLocalFiles);
   setupVideoDrop();
   elements.bilibiliInfoButton.addEventListener('click', readBilibiliInfo);
@@ -944,12 +948,23 @@ function setView(view) {
   if (view === 'home' || view === 'records') {
     state.currentCourseId = '';
   }
+  // 读笔记或看记录时把「新建任务」收成一行：半屏高度下，展开的表单会把正文挤到折叠线以下
+  setSourceCollapsed(view !== 'home');
   elements.jobEmpty.hidden = view !== 'home';
   elements.courseView.hidden = view !== 'course';
   elements.recordsView.hidden = view !== 'records';
   elements.jobDetail.hidden = !(view === 'job' && state.selectedId && state.currentJob);
   elements.recordsOpen.classList.toggle('is-active', view === 'records');
   renderCourses();
+}
+
+function setSourceCollapsed(collapsed) {
+  elements.sourceCard.classList.toggle('is-collapsed', Boolean(collapsed));
+  elements.sourceToggle.textContent = collapsed ? '展开' : '收起';
+  elements.sourceToggle.setAttribute('aria-expanded', String(!collapsed));
+  elements.sourceToggle.title = collapsed
+    ? '展开新建任务面板'
+    : '收起新建任务面板，给笔记腾出空间';
 }
 
 async function refreshCourses({ initial = false } = {}) {

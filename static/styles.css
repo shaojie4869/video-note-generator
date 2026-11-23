@@ -249,6 +249,39 @@ a {
   gap: 20px;
 }
 
+.source-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.source-toggle {
+  flex: none;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+  white-space: nowrap;
+}
+
+/* 读笔记/看记录时把「新建任务」收成一行：半屏下正文才不会被挤到折叠线以下 */
+.source-card.is-collapsed {
+  padding-bottom: 18px;
+}
+
+.source-card.is-collapsed .source-layout,
+.source-card.is-collapsed .privacy-note {
+  display: none;
+}
+
+.source-card.is-collapsed .section-heading {
+  margin-bottom: 0;
+}
+
+.source-card.is-collapsed #source-heading {
+  font-size: 17px;
+}
+
 .source-main {
   min-width: 0;
 }
@@ -2090,23 +2123,30 @@ select.input {
   to { opacity: 1; transform: translateY(0); }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1200px) {
   .page-main {
     width: 100%;
   }
 
-  .source-layout {
-    grid-template-columns: minmax(0, 1fr) 220px 120px;
-    gap: 16px;
+  /* 装饰立绘在窄窗口里会压住「归入课程」那一列，直接让位给内容 */
+  .panel-character,
+  .bg-character {
+    display: none;
   }
 
-  .panel-character {
-    width: 120px;
-    height: 120px;
+  .source-layout {
+    grid-template-columns: minmax(0, 1fr) 250px;
+    gap: 16px;
   }
 
   .workspace {
     grid-template-columns: 280px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 1100px) {
+  .source-layout {
+    grid-template-columns: minmax(0, 1fr) 220px;
   }
 
   .form-grid-four {
@@ -2118,7 +2158,15 @@ select.input {
   }
 }
 
-@media (max-width: 860px) {
+@media (max-width: 900px) {
+  /* 半屏附近把课程栏再收窄一点，正文才不至于被挤成一条 */
+  .workspace {
+    grid-template-columns: 250px minmax(0, 1fr);
+    gap: 16px;
+  }
+}
+
+@media (max-width: 720px) {
   .panel-character {
     display: none;
   }
@@ -2784,6 +2832,39 @@ select.input {
 .records-cancel:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* 半屏（≤1100）时四列挤不下：改成两行，标题占主位，
+   时间与耗时退到第二行，避免标题被压成每行一两个字。 */
+@media (max-width: 1100px) {
+  .records-row.is-head {
+    display: none;
+  }
+
+  .records-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 12px;
+    align-items: baseline;
+    padding: 10px 6px;
+  }
+
+  .records-row > .records-title {
+    grid-area: 1 / 1;
+    font-weight: 650;
+  }
+
+  .records-row > .records-tail {
+    grid-area: 1 / 2;
+  }
+
+  .records-row > .records-num:nth-child(1) {
+    grid-area: 2 / 1;
+    text-align: left;
+  }
+
+  .records-row > .records-num:nth-child(3) {
+    grid-area: 2 / 2;
+  }
 }
 
 /* ---------- 笔记页返回 ---------- */

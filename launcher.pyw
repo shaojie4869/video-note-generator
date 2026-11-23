@@ -192,17 +192,38 @@ def apply_window_icon() -> None:
         time.sleep(0.5)
 
 
+def window_size() -> tuple[int, int]:
+    """按屏幕逻辑分辨率决定初始窗口大小。
+
+    写死 1900×1300 在 150% 缩放的 2560 屏上比屏幕还宽，右半边直接跑到屏幕外，
+    看起来就像「右侧内容被裁掉了」。
+    """
+    try:
+        import webview
+
+        screen = webview.screens[0]
+        return (
+            max(900, min(1900, int(screen.width) - 90)),
+            max(600, min(1300, int(screen.height) - 80)),
+        )
+    except Exception:
+        return 1500, 960
+
+
 def open_native_window() -> None:
     import threading
 
     import webview
 
+    width, height = window_size()
     webview.create_window(
         TITLE,
         URL,
-        width=1900,
-        height=1300,
-        min_size=(1410, 930),
+        width=width,
+        height=height,
+        # 最小宽度要小于半屏：1366 屏的半屏是 683，1920 屏是 960。
+        # 原来写 1410，窗口根本没法吸附成半屏。
+        min_size=(680, 520),
         background_color="#f7f4fc",
     )
     threading.Thread(target=apply_window_icon, daemon=True).start()

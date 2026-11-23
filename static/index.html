@@ -26,16 +26,19 @@
 
   <main class="page-shell">
     <div class="page-main">
-      <section class="card source-card" aria-labelledby="source-heading">
+      <section id="source-card" class="card source-card" aria-labelledby="source-heading">
         <div class="section-heading">
           <div>
             <p class="eyebrow">新建任务</p>
             <h2 id="source-heading">选择学习来源</h2>
           </div>
-          <p class="privacy-note">只有点击“开始生成总结”才会转写、截取画面和调用模型</p>
+          <div class="source-heading-actions">
+            <p class="privacy-note">只有点击“开始生成总结”才会转写、截取画面和调用模型</p>
+            <button id="source-toggle" class="link-button source-toggle" type="button" aria-expanded="true" aria-controls="source-layout">收起</button>
+          </div>
         </div>
 
-        <div class="source-layout">
+        <div id="source-layout" class="source-layout">
           <div class="source-main">
           <div class="tabs" role="tablist" aria-label="视频来源">
             <button id="tab-local" class="tab is-active" type="button" role="tab" aria-selected="true" aria-controls="panel-local">本地视频</button>
