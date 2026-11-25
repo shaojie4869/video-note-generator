@@ -3401,6 +3401,10 @@ async function jumpToSearchResult(jobId, courseId) {
 }
 
 function exitSearch() {
+  // 只在搜索页生效：已经跳到某篇笔记后清空搜索框，不应该把人从笔记里带走
+  if (state.view !== 'search') {
+    return;
+  }
   const previous = state.search.returnView;
   state.search.returnView = null;
   state.search.request += 1;
