@@ -119,6 +119,10 @@
           </div>
           <span id="course-refresh-status" class="refresh-status" role="status">正在读取</span>
         </div>
+        <div class="course-search">
+          <input id="note-search" class="input" type="search" placeholder="搜索笔记里的知识点…" autocomplete="off" aria-label="搜索笔记知识点">
+          <button id="note-search-clear" class="course-search-clear" type="button" aria-label="清空搜索" title="清空搜索" hidden>×</button>
+        </div>
         <div id="course-empty" class="empty-state compact" hidden>
           <div class="empty-illustration" aria-hidden="true"></div>
           <h3>还没有课程</h3>
@@ -169,6 +173,17 @@
             </div>
           </div>
           <div id="records-list" class="records-list"></div>
+        </section>
+
+        <section id="search-view" class="search-view" hidden>
+          <div class="course-head">
+            <div class="course-head-main">
+              <p class="eyebrow">笔记搜索</p>
+              <h2 id="search-title">搜索结果</h2>
+              <p id="search-meta" class="muted"></p>
+            </div>
+          </div>
+          <div id="search-results" class="search-results"></div>
         </section>
 
         <div id="job-detail" hidden>
@@ -259,6 +274,7 @@
               <div class="module-toolbar">
                 <button class="button button-secondary button-small module-back" type="button">← 返回模块</button>
                 <div class="result-actions">
+                  <span class="highlight-hint">选中文字即可划重点</span>
                   <button id="copy-summary" class="button button-secondary button-small" type="button">复制笔记</button>
                   <button id="export-summary" class="button button-secondary button-small" type="button">导出 Markdown</button>
                 </div>
@@ -469,6 +485,16 @@
   </div>
 
   <div id="card-menu" class="text-menu card-menu" role="menu" aria-label="笔记操作" hidden></div>
+
+  <div id="hl-palette" class="hl-palette" role="toolbar" aria-label="划重点" hidden>
+    <span class="hl-palette-label">标重点</span>
+    <button class="hl-dot hl-yellow" type="button" data-color="yellow" title="黄色重点" aria-label="用黄色标为重点"></button>
+    <button class="hl-dot hl-green" type="button" data-color="green" title="绿色重点" aria-label="用绿色标为重点"></button>
+    <button class="hl-dot hl-blue" type="button" data-color="blue" title="蓝色重点" aria-label="用蓝色标为重点"></button>
+    <button class="hl-dot hl-pink" type="button" data-color="pink" title="粉色重点" aria-label="用粉色标为重点"></button>
+    <span class="hl-palette-sep" aria-hidden="true"></span>
+    <button class="hl-clear" type="button" data-action="clear">清除</button>
+  </div>
 
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
 </body>

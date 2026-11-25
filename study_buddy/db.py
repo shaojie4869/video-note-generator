@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import uuid
@@ -13,10 +14,33 @@ from .courses import auto_group, parse_sequence, sequence_sort_key
 
 MISC_COURSE_ID = "misc"
 MISC_COURSE_NAME = "杂项"
+# 划重点只允许这几种底色，前端也按这套 class 渲染
+HIGHLIGHT_COLORS = ("yellow", "green", "blue", "pink")
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_MARKDOWN_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MARKDOWN_MARKS = re.compile(r"[*_`>#|]+")
+
+
+def _search_snippet(text: str, needle: str, width: int = 150) -> str:
+    """截一段能看懂的上下文：去掉 markdown 记号、压平换行，前后补省略号。"""
+    clean = _MARKDOWN_LINK.sub(r"\1", text or "")
+    clean = _MARKDOWN_MARKS.sub(" ", clean)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if not clean:
+        return ""
+    index = clean.lower().find(needle.lower())
+    if index < 0:
+        return clean[:width] + ("…" if len(clean) > width else "")
+    start = max(0, index - width // 3)
+    end = min(len(clean), index + len(needle) + (width * 2) // 3)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(clean) else ""
+    return f"{prefix}{clean[start:end]}{suffix}"
 
 
 class Database:
@@ -121,6 +145,25 @@ class Database:
                     PRIMARY KEY (job_id, question_index)
                 )
                 """
+            )
+            # 划重点：按「原文片段 + 起始位置」存，笔记重新渲染时再贴回去。
+            # 不存 HTML 偏移，是因为 markdown 一改（重新生成、表格修复）DOM 结构就变了。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS note_highlights (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    field TEXT NOT NULL DEFAULT 'summary',
+                    quote TEXT NOT NULL,
+                    start INTEGER NOT NULL DEFAULT 0,
+                    color TEXT NOT NULL DEFAULT 'yellow',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_highlights_job "
+                "ON note_highlights(job_id, field)"
             )
             # 本地用量账本：平台只给余额汇总，看不到单次调用，只能自己记。
             connection.execute(
@@ -260,6 +303,10 @@ class Database:
             if cursor.rowcount > 0:
                 connection.execute(
                     "DELETE FROM question_stats WHERE job_id = ?", (job_id,)
+                )
+                # 笔记都没了，划的重点也没有意义，一并清掉。
+                connection.execute(
+                    "DELETE FROM note_highlights WHERE job_id = ?", (job_id,)
                 )
             return cursor.rowcount > 0
 
@@ -610,6 +657,112 @@ class Database:
         else:
             notes.sort(key=lambda item: (sequence_sort_key(item["seq"]), item["created_at"]))
         return notes
+
+    # ---------- 划重点 ----------
+
+    def add_highlight(
+        self, job_id: str, field: str, quote: str, start: int, color: str
+    ) -> dict[str, Any]:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO note_highlights (job_id, field, quote, start, color, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (job_id, field, quote, max(0, int(start)), color, utc_now()),
+            )
+            row = connection.execute(
+                "SELECT * FROM note_highlights WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return dict(row) if row else {}
+
+    def list_highlights(self, job_id: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, job_id, field, quote, start, color, created_at
+                FROM note_highlights WHERE job_id = ?
+                ORDER BY start, id
+                """,
+                (job_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_highlight(self, job_id: str, highlight_id: int) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM note_highlights WHERE id = ? AND job_id = ?",
+                (int(highlight_id), job_id),
+            )
+            return cursor.rowcount > 0
+
+    # ---------- 搜索笔记 ----------
+
+    def search_notes(self, query: str, limit: int = 40) -> list[dict[str, Any]]:
+        """在已完成的笔记里搜知识点。
+
+        只搜正文（笔记 / 画面笔记）和标题；同一来源只留最新一份，
+        返回带上下文的片段，前端点一条就能跳到对应笔记再定位。
+        """
+        needle = (query or "").strip()
+        if not needle:
+            return []
+        lowered = needle.lower()
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT j.id, j.cache_key, j.title, j.seq, j.course_id, j.created_at,
+                       j.summary, j.visual_notes,
+                       COALESCE(c.name, '') AS course_name
+                FROM jobs j
+                LEFT JOIN courses c ON c.id = j.course_id
+                WHERE j.status = 'completed' AND j.summary != ''
+                ORDER BY j.created_at DESC
+                """
+            ).fetchall()
+
+        results: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in rows:
+            cache_key = row["cache_key"] or row["id"]
+            if cache_key in seen:
+                continue
+            seen.add(cache_key)
+            summary = row["summary"] or ""
+            visual = row["visual_notes"] or ""
+            title = row["title"] or ""
+            if lowered in summary.lower():
+                field, text = "summary", summary
+            elif lowered in visual.lower():
+                field, text = "visual", visual
+            elif lowered in title.lower():
+                field, text = "title", summary
+            else:
+                continue
+            occurrences = (
+                summary.lower().count(lowered)
+                + visual.lower().count(lowered)
+                + title.lower().count(lowered)
+            )
+            snippet_source = summary if summary else title
+            if field == "visual":
+                snippet_source = visual
+            results.append(
+                {
+                    "id": row["id"],
+                    "title": title,
+                    "seq": row["seq"] or "",
+                    "course_id": row["course_id"] or "",
+                    "course_name": row["course_name"] or MISC_COURSE_NAME,
+                    "field": field,
+                    "snippet": _search_snippet(snippet_source, lowered),
+                    "occurrences": occurrences,
+                    "created_at": row["created_at"],
+                }
+            )
+            if len(results) >= max(1, limit):
+                break
+        return results
 
     def assign_missing_courses(self) -> int:
         """给历史任务补课程归属与章节号，升级后第一次启动时执行。"""

@@ -148,3 +148,76 @@ def test_rename_job_validates_and_updates_title(tmp_path, monkeypatch):
             assert missing.status_code == 404
         finally:
             client.delete(f"/api/jobs/{job_id}", headers=HEADERS)
+
+
+def test_search_endpoint_matches_note_text(tmp_path, monkeypatch):
+    monkeypatch.setattr(application.jobs, "_start", lambda *args: None)
+    video = tmp_path / "os.mp4"
+    video.write_bytes(b"test")
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        job = client.post(
+            "/api/jobs",
+            headers=HEADERS,
+            json={"source_type": "local", "source_ref": str(video), "title": "1-1 进程"},
+        ).json()["job"]
+        application.database.update_job(
+            job["id"],
+            status="completed",
+            summary="# 进程\n\n进程是资源分配的基本单位。",
+        )
+        body = client.get(
+            "/api/search", headers=HEADERS, params={"q": "资源分配"}
+        ).json()
+        hits = [item for item in body["results"] if item["id"] == job["id"]]
+        assert hits and "资源分配" in hits[0]["snippet"]
+        assert hits[0]["course_id"] == job["course_id"]
+
+        assert client.get("/api/search", headers=HEADERS, params={"q": "  "}).json()["results"] == []
+        assert client.get(
+            "/api/search", headers=HEADERS, params={"q": "x" * 90}
+        ).status_code == 422
+        client.delete(f"/api/jobs/{job['id']}", headers=HEADERS)
+
+
+def test_highlight_endpoints_create_list_and_delete(tmp_path, monkeypatch):
+    monkeypatch.setattr(application.jobs, "_start", lambda *args: None)
+    video = tmp_path / "note.mp4"
+    video.write_bytes(b"test")
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        job = client.post(
+            "/api/jobs",
+            headers=HEADERS,
+            json={"source_type": "local", "source_ref": str(video), "title": "1-2 线程"},
+        ).json()["job"]
+        created = client.post(
+            f"/api/jobs/{job['id']}/highlights",
+            headers=HEADERS,
+            json={"field": "summary", "quote": "调度单位", "start": 8, "color": "blue"},
+        )
+        assert created.status_code == 200
+        highlight = created.json()["highlight"]
+        assert highlight["color"] == "blue"
+
+        listed = client.get(f"/api/jobs/{job['id']}/highlights", headers=HEADERS).json()
+        assert [item["id"] for item in listed["highlights"]] == [highlight["id"]]
+
+        invalid = client.post(
+            f"/api/jobs/{job['id']}/highlights",
+            headers=HEADERS,
+            json={"field": "summary", "quote": "x", "color": "purple"},
+        )
+        assert invalid.status_code == 422
+
+        missing = client.get(
+            "/api/jobs/not-a-job/highlights", headers=HEADERS
+        )
+        assert missing.status_code == 404
+
+        removed = client.delete(
+            f"/api/jobs/{job['id']}/highlights/{highlight['id']}", headers=HEADERS
+        )
+        assert removed.status_code == 200
+        assert client.get(
+            f"/api/jobs/{job['id']}/highlights", headers=HEADERS
+        ).json()["highlights"] == []
+        client.delete(f"/api/jobs/{job['id']}", headers=HEADERS)

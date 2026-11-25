@@ -28,6 +28,7 @@ from study_buddy.schemas import (
     CourseCreate,
     CourseRename,
     GeneralSettings,
+    HighlightCreate,
     JobCreate,
     JobUpdate,
 )
@@ -92,7 +93,14 @@ def health() -> dict:
         "version": __version__,
         "build": BUILD_ID,
         "ffmpeg": ffmpeg_executable(),
-        "features": ["questions", "question_stats", "batch", "system"],
+        "features": [
+            "questions",
+            "question_stats",
+            "batch",
+            "system",
+            "highlights",
+            "search",
+        ],
     }
 
 
@@ -342,6 +350,18 @@ def list_jobs() -> dict:
     return {"jobs": database.list_jobs()}
 
 
+@app.get("/api/search")
+def search_notes(q: str = "", limit: int = 40) -> dict:
+    """按知识点搜全部笔记：返回命中的笔记、课程名和上下文片段。"""
+    query = (q or "").strip()
+    if not query:
+        return {"query": "", "results": []}
+    if len(query) > 80:
+        raise HTTPException(status_code=422, detail="搜索词太长了，请缩短到 80 字以内。")
+    results = database.search_notes(query, max(1, min(limit, 100)))
+    return {"query": query, "results": results}
+
+
 @app.get("/api/system")
 def system_profile() -> dict:
     """批量生成用的并发策略：给用户看清楚「为什么这样排队」。"""
@@ -377,6 +397,35 @@ def get_job(job_id: str) -> dict:
     job["usage"] = database.job_usage(job_id)
     job["question_stats"] = database.get_question_stats(job_id)
     return job
+
+
+@app.get("/api/jobs/{job_id}/highlights")
+def list_highlights(job_id: str) -> dict:
+    job = database.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    return {"highlights": database.list_highlights(job_id)}
+
+
+@app.post("/api/jobs/{job_id}/highlights")
+def create_highlight(job_id: str, payload: HighlightCreate) -> dict:
+    job = database.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="任务不存在。")
+    quote = payload.quote.strip()
+    if not quote:
+        raise HTTPException(status_code=422, detail="没有选中文字。")
+    highlight = database.add_highlight(
+        job_id, payload.field, quote, payload.start, payload.color
+    )
+    return {"highlight": highlight}
+
+
+@app.delete("/api/jobs/{job_id}/highlights/{highlight_id}")
+def remove_highlight(job_id: str, highlight_id: int) -> dict:
+    if not database.delete_highlight(job_id, highlight_id):
+        raise HTTPException(status_code=404, detail="这个标记已经不存在了。")
+    return {"ok": True}
 
 
 @app.post("/api/jobs/{job_id}/questions")

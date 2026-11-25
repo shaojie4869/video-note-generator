@@ -34,3 +34,65 @@ def test_usage_log_records_and_aggregates(tmp_path):
     assert summary["month"]["prompt_tokens"] == 1010
     assert summary["today"]["tokens"] == 1165
     assert database.job_usage("missing")["total_tokens"] == 0
+
+
+def test_search_notes_matches_summary_visual_and_title(tmp_path):
+    database = Database(tmp_path / "history.db")
+    course = database.create_course("操作系统", "course", "os-key")["id"]
+    first = database.create_job("local", "/videos/1.mp4", "1-1 进程", "ck-1", 0, course)
+    database.update_job(
+        first["id"],
+        status="completed",
+        summary="# 进程\n\n进程是资源分配的基本单位，进程和程序不同。",
+    )
+    second = database.create_job("local", "/videos/2.mp4", "1-2 线程", "ck-2", 0, course)
+    database.update_job(
+        second["id"],
+        status="completed",
+        summary="# 线程\n\n线程是调度单位。",
+        visual_notes="课件：进程与线程对比表",
+    )
+    third = database.create_job("local", "/videos/3.mp4", "1-3 调度", "ck-3", 0, course)
+    database.update_job(third["id"], status="completed", summary="# 调度\n\n进程调度算法。")
+
+    results = database.search_notes("进程")
+    by_id = {item["id"]: item for item in results}
+    assert set(by_id) == {first["id"], second["id"], third["id"]}
+    assert by_id[first["id"]]["field"] == "summary"
+    assert by_id[second["id"]]["field"] == "visual"
+    assert by_id[first["id"]]["course_name"] == "操作系统"
+    assert "进程" in by_id[first["id"]]["snippet"]
+    assert by_id[first["id"]]["occurrences"] >= 2
+
+    title_only = database.search_notes("线程")
+    assert [item["id"] for item in title_only][0] == second["id"]
+    assert database.search_notes("") == []
+    assert database.search_notes("不存在的知识点") == []
+
+
+def test_search_notes_keeps_one_note_per_source(tmp_path):
+    database = Database(tmp_path / "history.db")
+    old = database.create_job("local", "/videos/1.mp4", "1-1 进程", "same-key", 0)
+    database.update_job(old["id"], status="completed", summary="旧内容 进程")
+    new = database.create_job("local", "/videos/1.mp4", "1-1 进程", "same-key", 0)
+    database.update_job(new["id"], status="completed", summary="新内容 进程")
+
+    results = database.search_notes("进程")
+    assert [item["id"] for item in results] == [new["id"]]
+
+
+def test_highlights_are_stored_listed_and_removed_with_job(tmp_path):
+    database = Database(tmp_path / "history.db")
+    job = database.create_job("local", "/videos/1.mp4", "课程", "ck", 0)
+    saved = database.add_highlight(job["id"], "summary", "资源分配", 12, "green")
+    assert saved["quote"] == "资源分配"
+    assert saved["color"] == "green"
+    assert [item["id"] for item in database.list_highlights(job["id"])] == [saved["id"]]
+
+    assert database.delete_highlight(job["id"], saved["id"]) is True
+    assert database.list_highlights(job["id"]) == []
+
+    kept = database.add_highlight(job["id"], "visual", "对比表", 0, "blue")
+    database.delete_job(job["id"])
+    assert database.list_highlights(job["id"]) == []
+    assert database.delete_highlight(job["id"], kept["id"]) is False

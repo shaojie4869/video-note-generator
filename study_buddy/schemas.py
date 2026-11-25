@@ -57,6 +57,15 @@ class MessageResponse(BaseModel):
     message: str
 
 
+class HighlightCreate(BaseModel):
+    """划重点：只存原文片段和位置，渲染时再贴回 DOM。"""
+
+    field: Literal["summary", "visual"] = "summary"
+    quote: str = Field(min_length=1, max_length=2000)
+    start: int = Field(default=0, ge=0)
+    color: Literal["yellow", "green", "blue", "pink"] = "yellow"
+
+
 class JobUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=120)
     course_id: str | None = None

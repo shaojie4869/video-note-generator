@@ -44,6 +44,15 @@ const state = {
   pollErrorNotified: false,
   renderedSummaryJob: '',
   renderedSummary: '',
+  renderedVisualJob: '',
+  renderedVisual: '',
+  // 划重点：按笔记缓存，渲染后按「原文 + 起始位置」贴回去
+  highlights: { jobId: '', summary: [], visual: [] },
+  highlightPositions: { summary: [], visual: [] },
+  // 笔记搜索
+  search: { query: '', results: [], request: 0 },
+  // 从搜索结果跳进笔记后，需要在正文里定位并高亮
+  pendingLocate: null,
   models: [],
   visionModels: [],
   // 当前停留在哪个模块：'' 表示只看模块入口
@@ -81,6 +90,7 @@ function init() {
     'course-select', 'course-new', 'course-hint', 'records-open', 'records-entry-meta',
     'course-view', 'course-title', 'course-meta', 'course-more', 'course-active', 'course-notes', 'course-notes-empty',
     'records-view', 'records-meta', 'records-list', 'usage-badge', 'card-menu',
+    'note-search', 'note-search-clear', 'search-view', 'search-title', 'search-meta', 'search-results', 'hl-palette',
     'job-back', 'prev-note', 'next-note',
     'job-empty', 'job-detail', 'job-title', 'job-status', 'job-provider', 'job-created', 'job-usage', 'job-stage',
     'job-progress-section', 'job-progress', 'job-progress-text', 'cancel-job', 'confirmation-box', 'transcript-count', 'confirm-job',
@@ -166,6 +176,8 @@ function bindEvents() {
   elements.startButton.addEventListener('click', startNewJob);
   elements.courseNew.addEventListener('click', beginNewCourse);
   elements.recordsOpen.addEventListener('click', openRecords);
+  setupSearch();
+  setupHighlightPalette();
   elements.courseMore.addEventListener('click', (event) => {
     event.stopPropagation();
     openCourseMenu(elements.courseMore);
@@ -908,6 +920,8 @@ async function loadJob(id, { silent = false } = {}) {
     }
     state.currentJob = job;
     renderCurrentJob();
+    // 划重点单独取一次：笔记正文已经出来，标记可以晚一点贴上去
+    loadHighlights(id);
     return job;
   } catch (error) {
     if (!silent && request === state.detailRequest) {
@@ -953,6 +967,7 @@ function setView(view) {
   elements.jobEmpty.hidden = view !== 'home';
   elements.courseView.hidden = view !== 'course';
   elements.recordsView.hidden = view !== 'records';
+  elements.searchView.hidden = view !== 'search';
   elements.jobDetail.hidden = !(view === 'job' && state.selectedId && state.currentJob);
   elements.recordsOpen.classList.toggle('is-active', view === 'records');
   renderCourses();
@@ -1242,10 +1257,16 @@ function openNote(jobId) {
   state.currentModule = '';
   state.renderedSummaryJob = '';
   state.renderedSummary = '';
+  state.renderedVisualJob = '';
+  state.renderedVisual = '';
+  if (state.highlights.jobId !== jobId) {
+    state.highlights = { jobId: '', summary: [], visual: [] };
+    state.highlightPositions = { summary: [], visual: [] };
+  }
   updatePager();
   setView('job');
   renderCurrentJob();
-  loadJob(jobId);
+  return loadJob(jobId);
 }
 
 function updatePager() {
@@ -1816,19 +1837,26 @@ function renderCurrentJob() {
   const completed = job.status === 'completed' && Boolean(summary);
   elements.resultSection.hidden = !completed;
   if (summary && (state.renderedSummaryJob !== job.id || state.renderedSummary !== summary)) {
-    elements.summaryContent.innerHTML = renderMarkdown(summary);
-    state.renderedSummaryJob = job.id;
-    state.renderedSummary = summary;
+    renderNoteHtml('summary', summary, job.id);
   }
   if (completed) {
     syncModuleState(job);
+    handlePendingLocate(job);
   }
   const staleBackend = completed && state.backendFeatures !== null && !backendSupports('questions');
   elements.backendStale.hidden = !staleBackend;
 
   const visualNotes = typeof job.visual_notes === 'string' ? job.visual_notes : '';
   elements.visualDetails.hidden = !visualNotes;
-  elements.visualContent.innerHTML = visualNotes ? renderMarkdown(visualNotes) : '';
+  if (!visualNotes) {
+    if (state.renderedVisual) {
+      elements.visualContent.innerHTML = '';
+    }
+    state.renderedVisualJob = '';
+    state.renderedVisual = '';
+  } else if (state.renderedVisualJob !== job.id || state.renderedVisual !== visualNotes) {
+    renderNoteHtml('visual', visualNotes, job.id);
+  }
 
   const transcript = typeof job.transcript === 'string' ? job.transcript : '';
   elements.transcriptDetails.hidden = !transcript;
@@ -1919,7 +1947,7 @@ function switchModule(name) {
   if (state.currentModule === 'notes') {
     const job = state.currentJob;
     if (job && typeof job.summary === 'string' && job.summary) {
-      elements.summaryContent.innerHTML = renderMarkdown(job.summary);
+      renderNoteHtml('summary', job.summary, job.id);
     }
   }
   if (state.currentModule === 'quiz') {
@@ -2859,6 +2887,684 @@ function renderInline(value) {
   return text.replace(/\u0001(\d+)\u0001/g, (_, index) => codeTokens[Number(index)] || '');
 }
 
+/* ---------- 划重点 ---------- */
+
+const HIGHLIGHT_LABELS = { yellow: '黄色', green: '绿色', blue: '蓝色', pink: '粉色' };
+
+function highlightContainer(field) {
+  return field === 'visual' ? elements.visualContent : elements.summaryContent;
+}
+
+/** 把 markdown 渲染进正文，并立刻把已存的划重点贴回去。 */
+function renderNoteHtml(field, markdown, jobId) {
+  const container = highlightContainer(field);
+  if (!container) {
+    return;
+  }
+  container.innerHTML = renderMarkdown(markdown);
+  if (field === 'visual') {
+    state.renderedVisualJob = jobId;
+    state.renderedVisual = markdown;
+  } else {
+    state.renderedSummaryJob = jobId;
+    state.renderedSummary = markdown;
+  }
+  applyHighlights(field);
+}
+
+async function loadHighlights(jobId) {
+  if (!jobId || state.highlights.jobId === jobId) {
+    return;
+  }
+  state.highlights = { jobId, summary: [], visual: [] };
+  state.highlightPositions = { summary: [], visual: [] };
+  try {
+    const result = await api(`/api/jobs/${encodeURIComponent(jobId)}/highlights`);
+    if (state.selectedId !== jobId || state.highlights.jobId !== jobId) {
+      return;
+    }
+    const list = Array.isArray(result.highlights) ? result.highlights : [];
+    state.highlights.summary = list.filter((item) => item.field === 'summary');
+    state.highlights.visual = list.filter((item) => item.field === 'visual');
+    applyHighlights('summary');
+    applyHighlights('visual');
+  } catch (_error) {
+    // 划重点是附加功能，接口失败就当作还没有标记，不打断阅读
+  }
+}
+
+function unwrapHighlights(container) {
+  container.querySelectorAll('mark.note-hl').forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) {
+      return;
+    }
+    while (mark.firstChild) {
+      parent.insertBefore(mark.firstChild, mark);
+    }
+    parent.removeChild(mark);
+  });
+  container.normalize();
+}
+
+/** 在纯文本里找片段：先信记录里的位置，找不到再全局找一次。 */
+function locateQuote(text, quote, hint) {
+  if (!quote) {
+    return -1;
+  }
+  const start = Math.max(0, Number(hint) || 0);
+  if (text.startsWith(quote, start)) {
+    return start;
+  }
+  const near = text.indexOf(quote, Math.max(0, start - 24));
+  if (near >= 0) {
+    return near;
+  }
+  return text.indexOf(quote);
+}
+
+/**
+ * 按「正文纯文本的第 start~end 个字符」包一个 mark。
+ * 笔记里已经渲染成 h3/p/table，不能直接按节点切，只能走文本节点累计偏移。
+ */
+function wrapTextRange(container, start, end, className, dataset) {
+  if (!(end > start)) {
+    return null;
+  }
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let startNode = null;
+  let startOffset = 0;
+  let endNode = null;
+  let endOffset = 0;
+  let node = walker.nextNode();
+  while (node) {
+    const length = node.nodeValue ? node.nodeValue.length : 0;
+    const nodeStart = offset;
+    const nodeEnd = offset + length;
+    if (!startNode && start < nodeEnd) {
+      startNode = node;
+      startOffset = start - nodeStart;
+    }
+    if (startNode && end <= nodeEnd) {
+      endNode = node;
+      endOffset = end - nodeStart;
+      break;
+    }
+    offset = nodeEnd;
+    node = walker.nextNode();
+  }
+  if (!startNode) {
+    return null;
+  }
+  if (!endNode) {
+    endNode = startNode;
+    endOffset = startNode.nodeValue ? startNode.nodeValue.length : 0;
+  }
+  const range = document.createRange();
+  range.setStart(startNode, Math.min(startOffset, startNode.nodeValue.length));
+  range.setEnd(endNode, Math.min(endOffset, endNode.nodeValue.length));
+  const wrapper = document.createElement('mark');
+  wrapper.className = className;
+  if (dataset) {
+    Object.entries(dataset).forEach(([key, value]) => {
+      wrapper.dataset[key] = String(value === undefined || value === null ? '' : value);
+    });
+  }
+  try {
+    wrapper.appendChild(range.extractContents());
+    range.insertNode(wrapper);
+  } catch (_error) {
+    return null;
+  }
+  return wrapper;
+}
+
+function applyHighlights(field) {
+  const container = highlightContainer(field);
+  if (!container) {
+    return;
+  }
+  unwrapHighlights(container);
+  const usable = state.highlights.jobId && state.highlights.jobId === state.selectedId;
+  const records = usable ? (state.highlights[field] || []).slice() : [];
+  const text = container.textContent || '';
+  const positioned = [];
+  let occupied = 0;
+  records
+    .sort((a, b) => (Number(a.start) || 0) - (Number(b.start) || 0) || Number(a.id) - Number(b.id))
+    .forEach((record) => {
+      const at = locateQuote(text, record.quote, record.start);
+      if (at < 0) {
+        return;
+      }
+      const finish = at + record.quote.length;
+      // 历史数据可能重叠，重叠部分不嵌套第二层，免得清除时只掉了外壳
+      if (at < occupied) {
+        return;
+      }
+      positioned.push({ record, start: at, end: finish });
+      occupied = finish;
+    });
+  state.highlightPositions[field] = positioned;
+  positioned.forEach((item) => {
+    wrapTextRange(
+      container,
+      item.start,
+      item.end,
+      `note-hl hl-${item.record.color || 'yellow'}`,
+      { highlightId: item.record.id }
+    );
+  });
+}
+
+/** 当前选区落在哪块笔记里：返回纯文本偏移，供保存与重新贴回使用。 */
+function currentSelectionContext() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return null;
+  }
+  const range = selection.getRangeAt(0);
+  let container = null;
+  let field = '';
+  if (elements.summaryContent.contains(range.commonAncestorContainer)) {
+    container = elements.summaryContent;
+    field = 'summary';
+  } else if (elements.visualContent.contains(range.commonAncestorContainer)) {
+    container = elements.visualContent;
+    field = 'visual';
+  }
+  if (!container) {
+    return null;
+  }
+  const before = range.cloneRange();
+  before.selectNodeContents(container);
+  before.setEnd(range.startContainer, range.startOffset);
+  const start = before.toString().length;
+  const text = container.textContent || '';
+  const quote = text.slice(start, start + range.toString().length);
+  if (!quote.trim() || quote.length > 2000) {
+    return null;
+  }
+  return { field, container, start, quote, end: start + quote.length, range };
+}
+
+function overlappingHighlights(context) {
+  const positioned = state.highlightPositions[context.field] || [];
+  return positioned.filter((item) => item.start < context.end && item.end > context.start);
+}
+
+function hideHighlightPalette() {
+  if (elements.hlPalette) {
+    elements.hlPalette.hidden = true;
+  }
+}
+
+function showHighlightPalette() {
+  const context = currentSelectionContext();
+  if (!context) {
+    hideHighlightPalette();
+    return;
+  }
+  const rect = context.range.getBoundingClientRect();
+  if (!rect || (!rect.width && !rect.height)) {
+    hideHighlightPalette();
+    return;
+  }
+  elements.hlPalette.hidden = false;
+  const palette = elements.hlPalette.getBoundingClientRect();
+  let top = rect.top - palette.height - 10;
+  if (top < 8) {
+    top = rect.bottom + 10;
+  }
+  let left = rect.left + rect.width / 2 - palette.width / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - palette.width - 8));
+  elements.hlPalette.style.top = `${Math.round(top)}px`;
+  elements.hlPalette.style.left = `${Math.round(left)}px`;
+}
+
+function setupHighlightPalette() {
+  document.addEventListener('mouseup', (event) => {
+    if (elements.hlPalette.contains(event.target)) {
+      return;
+    }
+    // 等浏览器把选区结算完再量位置
+    window.setTimeout(showHighlightPalette, 10);
+  });
+  document.addEventListener('selectionchange', () => {
+    if (elements.hlPalette.hidden) {
+      return;
+    }
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) {
+      hideHighlightPalette();
+    }
+  });
+  // 按住按钮时不取消选区，否则点颜色前选中文字就没了
+  elements.hlPalette.addEventListener('mousedown', (event) => event.preventDefault());
+  elements.hlPalette.addEventListener('click', handleHighlightPaletteClick);
+  window.addEventListener('scroll', hideHighlightPalette, true);
+  window.addEventListener('resize', hideHighlightPalette);
+}
+
+async function handleHighlightPaletteClick(event) {
+  const button = event.target.closest('button');
+  if (!button) {
+    return;
+  }
+  const context = currentSelectionContext();
+  hideHighlightPalette();
+  if (!context) {
+    showToast('选中的文字已经取消，请重新选择。', 'info');
+    return;
+  }
+  const selection = window.getSelection();
+  try {
+    if (button.dataset.action === 'clear') {
+      await clearHighlightsInContext(context);
+    } else if (button.dataset.color) {
+      await addHighlight(context, button.dataset.color);
+    }
+  } catch (error) {
+    showToast(error.message, 'error');
+  } finally {
+    if (selection) {
+      selection.removeAllRanges();
+    }
+  }
+}
+
+async function addHighlight(context, color) {
+  const jobId = state.selectedId;
+  if (!jobId) {
+    return;
+  }
+  // 覆盖已有的同段标记：先删旧的，再建新的，避免两层 mark 叠在一起
+  const overlapping = overlappingHighlights(context);
+  for (const item of overlapping) {
+    await api(`/api/jobs/${encodeURIComponent(jobId)}/highlights/${item.record.id}`, {
+      method: 'DELETE'
+    });
+    state.highlights[context.field] = state.highlights[context.field]
+      .filter((record) => record.id !== item.record.id);
+  }
+  const result = await api(`/api/jobs/${encodeURIComponent(jobId)}/highlights`, {
+    method: 'POST',
+    body: JSON.stringify({
+      field: context.field,
+      quote: context.quote,
+      start: context.start,
+      color
+    })
+  });
+  state.highlights.jobId = jobId;
+  state.highlights[context.field].push(result.highlight);
+  applyHighlights(context.field);
+  showToast(`已用${HIGHLIGHT_LABELS[color] || ''}标出重点。`, 'success');
+}
+
+async function clearHighlightsInContext(context) {
+  const jobId = state.selectedId;
+  const overlapping = overlappingHighlights(context);
+  if (!jobId || !overlapping.length) {
+    showToast('这段文字还没有标记。', 'info');
+    return;
+  }
+  for (const item of overlapping) {
+    await api(`/api/jobs/${encodeURIComponent(jobId)}/highlights/${item.record.id}`, {
+      method: 'DELETE'
+    });
+    state.highlights[context.field] = state.highlights[context.field]
+      .filter((record) => record.id !== item.record.id);
+  }
+  applyHighlights(context.field);
+  showToast('已取消标记。', 'success');
+}
+
+/* ---------- 笔记搜索 ---------- */
+
+function setupSearch() {
+  let timer = 0;
+  elements.noteSearch.addEventListener('input', () => {
+    const query = elements.noteSearch.value.trim();
+    elements.noteSearchClear.hidden = !query;
+    window.clearTimeout(timer);
+    if (!query) {
+      if (state.view === 'search') {
+        exitSearch();
+      }
+      return;
+    }
+    timer = window.setTimeout(() => runSearch(query), 280);
+  });
+  elements.noteSearch.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      window.clearTimeout(timer);
+      runSearch(elements.noteSearch.value.trim());
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      clearSearchInput();
+      exitSearch();
+    }
+  });
+  elements.noteSearchClear.addEventListener('click', () => {
+    clearSearchInput();
+    exitSearch();
+    elements.noteSearch.focus();
+  });
+  elements.searchResults.addEventListener('click', (event) => {
+    const row = event.target.closest('[data-job-id]');
+    if (row) {
+      jumpToSearchResult(row.dataset.jobId, row.dataset.courseId);
+    }
+  });
+}
+
+function clearSearchInput() {
+  elements.noteSearch.value = '';
+  elements.noteSearchClear.hidden = true;
+}
+
+async function runSearch(query) {
+  if (!query) {
+    return;
+  }
+  if (state.view !== 'search') {
+    state.search.returnView = {
+      view: state.view,
+      courseId: state.currentCourseId,
+      jobId: state.selectedId || ''
+    };
+    setView('search');
+  }
+  const request = ++state.search.request;
+  state.search.query = query;
+  elements.searchTitle.textContent = `“${query}” 的搜索结果`;
+  elements.searchMeta.textContent = '正在搜索…';
+  elements.searchResults.replaceChildren();
+  try {
+    const result = await api(`/api/search?q=${encodeURIComponent(query)}&limit=60`);
+    if (request !== state.search.request) {
+      return;
+    }
+    state.search.results = Array.isArray(result.results) ? result.results : [];
+    renderSearchResults();
+  } catch (error) {
+    if (request === state.search.request) {
+      elements.searchMeta.textContent = error.message;
+    }
+  }
+}
+
+function renderSearchResults() {
+  const results = state.search.results;
+  const query = state.search.query;
+  elements.searchMeta.textContent = results.length
+    ? `找到 ${results.length} 条笔记，点一条即可跳转并定位到原文`
+    : '没有找到包含这个知识点的笔记；换个更短的词试试';
+  const fragment = document.createDocumentFragment();
+  results.forEach((item) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'search-result';
+    row.dataset.jobId = item.id;
+    row.dataset.courseId = item.course_id || '';
+
+    const head = document.createElement('span');
+    head.className = 'search-result-head';
+    const course = document.createElement('span');
+    course.className = 'search-result-course';
+    course.textContent = item.course_name || '杂项';
+    const title = document.createElement('span');
+    title.className = 'search-result-title';
+    const seq = item.seq ? `${item.seq} ` : '';
+    title.textContent = `${seq}${item.title || '未命名笔记'}`;
+    head.append(course, title);
+    if (Number(item.occurrences) > 1) {
+      const count = document.createElement('span');
+      count.className = 'search-result-count';
+      count.textContent = `${item.occurrences} 处`;
+      head.appendChild(count);
+    }
+    row.appendChild(head);
+
+    const snippet = document.createElement('span');
+    snippet.className = 'search-result-snippet';
+    appendMarkedText(snippet, item.snippet, query);
+    row.appendChild(snippet);
+
+    if (item.field === 'visual') {
+      const tag = document.createElement('span');
+      tag.className = 'search-result-tag';
+      tag.textContent = '课件画面';
+      row.appendChild(tag);
+    } else if (item.field === 'title') {
+      const tag = document.createElement('span');
+      tag.className = 'search-result-tag';
+      tag.textContent = '标题命中';
+      row.appendChild(tag);
+    }
+    fragment.appendChild(row);
+  });
+  elements.searchResults.replaceChildren(fragment);
+}
+
+function appendMarkedText(container, text, query) {
+  const value = String(text || '');
+  const needle = String(query || '').toLowerCase();
+  if (!value) {
+    return;
+  }
+  if (!needle) {
+    container.textContent = value;
+    return;
+  }
+  const lowered = value.toLowerCase();
+  let index = lowered.indexOf(needle);
+  if (index < 0) {
+    container.textContent = value;
+    return;
+  }
+  let cursor = 0;
+  while (index >= 0) {
+    if (index > cursor) {
+      container.appendChild(document.createTextNode(value.slice(cursor, index)));
+    }
+    const mark = document.createElement('mark');
+    mark.className = 'search-mark';
+    mark.textContent = value.slice(index, index + needle.length);
+    container.appendChild(mark);
+    cursor = index + needle.length;
+    index = lowered.indexOf(needle, cursor);
+  }
+  if (cursor < value.length) {
+    container.appendChild(document.createTextNode(value.slice(cursor)));
+  }
+}
+
+async function jumpToSearchResult(jobId, courseId) {
+  if (!jobId) {
+    return;
+  }
+  const query = state.search.query;
+  state.pendingLocate = { jobId, query };
+  state.search.returnView = null;
+  if (courseId && courseId !== state.currentCourseId) {
+    try {
+      await openCourse(courseId);
+    } catch (_error) {
+      // 课程读取失败也照常打开笔记
+    }
+  }
+  openNote(jobId);
+}
+
+function exitSearch() {
+  const previous = state.search.returnView;
+  state.search.returnView = null;
+  state.search.request += 1;
+  state.search.results = [];
+  if (previous && previous.view === 'job' && previous.jobId) {
+    openNote(previous.jobId);
+    return;
+  }
+  if (previous && previous.courseId) {
+    openCourse(previous.courseId);
+    return;
+  }
+  if (state.currentCourseId) {
+    openCourse(state.currentCourseId);
+    return;
+  }
+  setView('home');
+}
+
+/** 从搜索结果进来后，把命中词在正文里标出来并滚到视野中间。 */
+function handlePendingLocate(job) {
+  const pending = state.pendingLocate;
+  if (!pending || pending.jobId !== job.id) {
+    return;
+  }
+  state.pendingLocate = null;
+  window.setTimeout(() => {
+    if (state.selectedId !== job.id) {
+      return;
+    }
+    if (state.currentModule !== 'notes') {
+      switchModule('notes');
+    }
+    focusSearchTerm(pending.query);
+  }, 60);
+}
+
+function focusSearchTerm(query) {
+  const needle = String(query || '').trim();
+  if (!needle) {
+    return;
+  }
+  let container = elements.summaryContent;
+  let text = container.textContent || '';
+  let index = text.toLowerCase().indexOf(needle.toLowerCase());
+  if (index < 0) {
+    // 命中词只在课件画面里：展开那一栏再定位
+    container = elements.visualContent;
+    text = container.textContent || '';
+    index = text.toLowerCase().indexOf(needle.toLowerCase());
+    if (index >= 0) {
+      elements.visualDetails.open = true;
+    }
+  }
+  if (index < 0) {
+    return;
+  }
+  const mark = wrapTextRange(container, index, index + needle.length, 'search-hit');
+  if (!mark) {
+    return;
+  }
+  mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  window.setTimeout(() => {
+    if (!mark.isConnected) {
+      return;
+    }
+    const parent = mark.parentNode;
+    while (mark.firstChild) {
+      parent.insertBefore(mark.firstChild, mark);
+    }
+    parent.removeChild(mark);
+    parent.normalize();
+  }, 6000);
+}
+
+/* ---------- Markdown 渲染 ---------- */
+
+function splitTableRow(line) {
+  let text = String(line || '').trim();
+  if (text.startsWith('|')) {
+    text = text.slice(1);
+  }
+  if (text.endsWith('|')) {
+    text = text.slice(0, -1);
+  }
+  const cells = [];
+  let buffer = '';
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === '\\' && text[index + 1] === '|') {
+      buffer += '|';
+      index += 1;
+      continue;
+    }
+    if (char === '|') {
+      cells.push(buffer.trim());
+      buffer = '';
+      continue;
+    }
+    buffer += char;
+  }
+  cells.push(buffer.trim());
+  return cells;
+}
+
+function isTableSeparator(line) {
+  const cells = splitTableRow(line);
+  if (!cells.length) {
+    return false;
+  }
+  return cells.every((cell) => /^:?-{2,}:?$/.test(cell.replace(/\s+/g, '')));
+}
+
+function tableAlignments(line) {
+  return splitTableRow(line).map((cell) => {
+    const spec = cell.replace(/\s+/g, '');
+    const left = spec.startsWith(':');
+    const right = spec.endsWith(':');
+    if (left && right) {
+      return 'center';
+    }
+    if (right) {
+      return 'right';
+    }
+    return left ? 'left' : '';
+  });
+}
+
+function looksLikeTable(lines, index) {
+  const line = lines[index];
+  const next = lines[index + 1];
+  if (next === undefined || !line || !line.includes('|')) {
+    return false;
+  }
+  return isTableSeparator(next);
+}
+
+function renderTable(headerLine, separatorLine, rowLines) {
+  const headers = splitTableRow(headerLine);
+  const aligns = tableAlignments(separatorLine);
+  const columns = Math.max(headers.length, aligns.length);
+  while (headers.length < columns) {
+    headers.push('');
+  }
+  const alignStyle = (index) => (aligns[index] ? ` style="text-align:${aligns[index]}"` : '');
+  const head = headers
+    .map((cell, index) => `<th${alignStyle(index)}>${renderInline(cell)}</th>`)
+    .join('');
+  const body = rowLines
+    .map((line) => {
+      const cells = splitTableRow(line);
+      while (cells.length < columns) {
+        cells.push('');
+      }
+      const tds = cells
+        .slice(0, columns)
+        .map((cell, index) => `<td${alignStyle(index)}>${renderInline(cell)}</td>`)
+        .join('');
+      return `<tr>${tds}</tr>`;
+    })
+    .join('');
+  return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
 function renderMarkdown(markdown) {
   const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
   const output = [];
@@ -2896,7 +3602,8 @@ function renderMarkdown(markdown) {
     codeLines = [];
   };
 
-  lines.forEach((line) => {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
     if (inCode) {
       if (/^\s*```/.test(line)) {
         flushCode();
@@ -2904,17 +3611,39 @@ function renderMarkdown(markdown) {
       } else {
         codeLines.push(line);
       }
-      return;
+      continue;
     }
     if (/^\s*```/.test(line)) {
       flushTextBlocks();
       inCode = true;
       codeLines = [];
-      return;
+      continue;
     }
     if (!line.trim()) {
       flushTextBlocks();
-      return;
+      continue;
+    }
+
+    // 表格：表头下一行是 |---|:--:| 这类分隔行才认，
+    // 否则笔记里随手写的「A | B」会被误判成表格。
+    if (looksLikeTable(lines, lineIndex)) {
+      flushTextBlocks();
+      const headerLine = line;
+      const separatorLine = lines[lineIndex + 1];
+      const rowLines = [];
+      lineIndex += 2;
+      while (lineIndex < lines.length) {
+        const rowLine = lines[lineIndex];
+        if (!rowLine.trim() || !rowLine.includes('|') || /^\s*```/.test(rowLine)) {
+          break;
+        }
+        rowLines.push(rowLine);
+        lineIndex += 1;
+      }
+      // 让 for 的 += 1 落在表格后第一行，而不是跳过它
+      lineIndex -= 1;
+      output.push(renderTable(headerLine, separatorLine, rowLines));
+      continue;
     }
 
     const heading = line.match(/^\s{0,3}(#{1,6})\s+(.+)$/);
@@ -2922,7 +3651,7 @@ function renderMarkdown(markdown) {
       flushTextBlocks();
       const level = heading[1].length;
       output.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
-      return;
+      continue;
     }
 
     const unordered = line.match(/^\s*[-*+]\s+(.+)$/);
@@ -2939,7 +3668,7 @@ function renderMarkdown(markdown) {
         output.push(`<${listType}>`);
       }
       output.push(`<li>${renderInline((unordered || ordered)[1])}</li>`);
-      return;
+      continue;
     }
 
     const quote = line.match(/^\s*>\s?(.*)$/);
@@ -2947,13 +3676,13 @@ function renderMarkdown(markdown) {
       flushParagraph();
       flushList();
       quoteLines.push(quote[1]);
-      return;
+      continue;
     }
 
     flushList();
     flushQuote();
     paragraph.push(line.trim());
-  });
+  }
 
   flushTextBlocks();
   if (inCode) {
