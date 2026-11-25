@@ -2964,60 +2964,56 @@ function locateQuote(text, quote, hint) {
 }
 
 /**
- * 按「正文纯文本的第 start~end 个字符」包一个 mark。
- * 笔记里已经渲染成 h3/p/table，不能直接按节点切，只能走文本节点累计偏移。
+ * 按「正文纯文本的第 start~end 个字符」把文字包上 mark，返回这几段 mark。
+ *
+ * 关键：必须**逐个文本节点**包，绝不能把整个 Range 一次性 extractContents。
+ * 跨列表项 / 段落选中时，一个 Range 会捎带 <li>、<p> 这些块级元素，
+ * 塞进 <mark> 后列表结构当场散架，文字也会被搬得七零八落。
  */
 function wrapTextRange(container, start, end, className, dataset) {
   if (!(end > start)) {
-    return null;
+    return [];
   }
   const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const segments = [];
   let offset = 0;
-  let startNode = null;
-  let startOffset = 0;
-  let endNode = null;
-  let endOffset = 0;
   let node = walker.nextNode();
   while (node) {
     const length = node.nodeValue ? node.nodeValue.length : 0;
     const nodeStart = offset;
     const nodeEnd = offset + length;
-    if (!startNode && start < nodeEnd) {
-      startNode = node;
-      startOffset = start - nodeStart;
+    const from = Math.max(start, nodeStart);
+    const to = Math.min(end, nodeEnd);
+    if (to > from) {
+      segments.push({ node, from: from - nodeStart, to: to - nodeStart });
     }
-    if (startNode && end <= nodeEnd) {
-      endNode = node;
-      endOffset = end - nodeStart;
+    if (nodeEnd >= end) {
       break;
     }
     offset = nodeEnd;
     node = walker.nextNode();
   }
-  if (!startNode) {
-    return null;
-  }
-  if (!endNode) {
-    endNode = startNode;
-    endOffset = startNode.nodeValue ? startNode.nodeValue.length : 0;
-  }
-  const range = document.createRange();
-  range.setStart(startNode, Math.min(startOffset, startNode.nodeValue.length));
-  range.setEnd(endNode, Math.min(endOffset, endNode.nodeValue.length));
-  const wrapper = document.createElement('mark');
-  wrapper.className = className;
-  if (dataset) {
-    Object.entries(dataset).forEach(([key, value]) => {
-      wrapper.dataset[key] = String(value === undefined || value === null ? '' : value);
-    });
-  }
-  try {
-    wrapper.appendChild(range.extractContents());
-    range.insertNode(wrapper);
-  } catch (_error) {
-    return null;
-  }
-  return wrapper;
+  const marks = [];
+  segments.forEach((segment) => {
+    const range = document.createRange();
+    range.setStart(segment.node, segment.from);
+    range.setEnd(segment.node, segment.to);
+    const mark = document.createElement('mark');
+    mark.className = className;
+    if (dataset) {
+      Object.entries(dataset).forEach(([key, value]) => {
+        mark.dataset[key] = String(value === undefined || value === null ? '' : value);
+      });
+    }
+    try {
+      mark.appendChild(range.extractContents());
+      range.insertNode(mark);
+      marks.push(mark);
+    } catch (_error) {
+      // 这一段包不上就跳过，不能因为一处失败破坏整篇结构
+    }
+  });
+  return marks;
 }
 
 function applyHighlights(field) {
@@ -3059,6 +3055,41 @@ function applyHighlights(field) {
 }
 
 /** 当前选区落在哪块笔记里：返回纯文本偏移，供保存与重新贴回使用。 */
+/** 选区端点 → 正文 textContent 的字符偏移（跨段落时 Range.toString 会多出换行，不能用）。 */
+function textOffsetOfPosition(container, node, offset) {
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  if (node.nodeType === Node.TEXT_NODE) {
+    let total = 0;
+    let current = walker.nextNode();
+    while (current) {
+      if (current === node) {
+        return total + Math.min(offset, current.nodeValue.length);
+      }
+      total += current.nodeValue.length;
+      current = walker.nextNode();
+    }
+    return total;
+  }
+  // 端点落在元素上（选了整段、或从段首开始）：按「该位置的文字之前有多少字」算
+  const probe = document.createRange();
+  try {
+    probe.setStart(node, offset);
+    probe.collapse(true);
+  } catch (_error) {
+    return 0;
+  }
+  let total = 0;
+  let current = walker.nextNode();
+  while (current) {
+    if (probe.comparePoint(current, 0) >= 0) {
+      break;
+    }
+    total += current.nodeValue.length;
+    current = walker.nextNode();
+  }
+  return total;
+}
+
 function currentSelectionContext() {
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
@@ -3077,14 +3108,18 @@ function currentSelectionContext() {
   if (!container) {
     return null;
   }
-  const before = range.cloneRange();
-  before.selectNodeContents(container);
-  before.setEnd(range.startContainer, range.startOffset);
-  const start = before.toString().length;
   const text = container.textContent || '';
-  const quote = text.slice(start, start + range.toString().length);
+  let start = textOffsetOfPosition(container, range.startContainer, range.startOffset);
+  // 用片段取原文：textContent 拼块级元素时不插换行，和 Range.toString() 的长度会差几个字符
+  const quote = range.cloneContents().textContent || '';
   if (!quote.trim() || quote.length > 2000) {
     return null;
+  }
+  if (text.slice(start, start + quote.length) !== quote) {
+    const corrected = text.indexOf(quote, Math.max(0, start - 80));
+    if (corrected >= 0) {
+      start = corrected;
+    }
   }
   return { field, container, start, quote, end: start + quote.length, range };
 }
@@ -3462,21 +3497,23 @@ function focusSearchTerm(query) {
   if (index < 0) {
     return;
   }
-  const mark = wrapTextRange(container, index, index + needle.length, 'search-hit');
-  if (!mark) {
+  const marks = wrapTextRange(container, index, index + needle.length, 'search-hit');
+  if (!marks.length) {
     return;
   }
-  mark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  marks[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
   window.setTimeout(() => {
-    if (!mark.isConnected) {
-      return;
-    }
-    const parent = mark.parentNode;
-    while (mark.firstChild) {
-      parent.insertBefore(mark.firstChild, mark);
-    }
-    parent.removeChild(mark);
-    parent.normalize();
+    marks.forEach((mark) => {
+      if (!mark.isConnected) {
+        return;
+      }
+      const parent = mark.parentNode;
+      while (mark.firstChild) {
+        parent.insertBefore(mark.firstChild, mark);
+      }
+      parent.removeChild(mark);
+      parent.normalize();
+    });
   }, 6000);
 }
 
