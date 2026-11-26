@@ -16,6 +16,7 @@ import httpx
 
 from .config import SettingsManager
 from .errors import JobCancelled, ProviderError
+from .syllabus408 import syllabus_block
 
 logger = logging.getLogger(__name__)
 
@@ -612,14 +613,25 @@ QUESTION_COUNT = 12
 
 QUESTION_PROMPT = """你是 408 计算机考研的出题老师。请根据下面的学习笔记，为课程《{{TITLE}}》出 {{COUNT}} 道复习题。
 
-硬性要求：
-1. 只考笔记里确实讲过的内容，不引入笔记之外的知识。
-2. 题型必须混合：至少要包含选择题、判断题、简答题三类，不要全部出成选择题。
-3. 尽量覆盖不同知识点，同一个考点最多出 2 题。
-4. 每题都能独立作答，题干不依赖其他题目。
-5. 答案要写出具体结论，禁止写“见笔记”“参考原文”。
-6. 解析用一句话说明这道题考什么、为什么这样答。
-7. 难度分三档：easy 记忆类、medium 理解类、hard 辨析或综合类，三档各至少 3 题。
+【一、素材边界（最高优先级）】
+1. 只考笔记里确实讲过的知识点和原理，不引入笔记之外的内容。
+2. 严禁把「举例里的数字、配置、场景」当考点。例如「某台服务器 CPU 使用率是多少」「老师举的例子里有几台机器」这类题一律不要。
+   只有两种情况可以出现数字：① 408 要求记住的常量（页大小 4KB、Cache 行 64B、常用端口号、复杂度量级等）；② 题干给出条件、需要考生计算。
+3. 题干不得出现「笔记中提到」「老师举例」「视频里说」这类指向材料的措辞，也不能写成对原文的复述；必须能脱离笔记独立作答。
+4. 举例只能用来构造情景题：给一个场景问「这对应什么原理 / 为什么这样做」，不能问「例子里是几」。
+
+【二、出题重点】
+5. 优先围绕笔记里的「考点提示」出题；它标了「只需掌握思路」「不考特别深」的，就只出概念判断题，不考细节。
+6. 尽量覆盖不同知识点，同一考点最多出 2 题；优先覆盖会考、易混、易错的点，不要平均用力。
+7. 选择题的每个错误选项都要对应一个真实的常见误解（例如把「提高利用率」错成「提高主频」），不要用互不相干的数字凑选项。
+
+【三、难度与题型】
+8. 难度按题量三等分，且 hard 不得少于 3 题（12 题时按 easy 4、medium 4、hard 4 分配）：
+   easy = 概念归属与辨析（不背数字）；medium = 因果与条件（为什么、在什么前提下成立）；hard = 对比、边界或计算（给条件推结论，或两种方案怎么选）。
+9. 题型按比例混合（12 题时：选择题 6、判断题 3、简答题 3）；选择题不少于三分之一，判断题和简答题各不少于 2 题，合计 {{COUNT}} 题。
+10. 每题都能独立作答；答案写具体结论，禁止「见笔记」「参考原文」；解析用一句话说明考什么、为什么这样答。
+
+{{SYLLABUS}}
 
 只输出 JSON 数组，不要任何解释文字，不要 Markdown 代码块标记，不要注释。格式：
 [
@@ -692,6 +704,84 @@ def parse_questions(raw: str) -> list[dict[str, Any]]:
             }
         )
     return questions
+
+
+# 指向材料的措辞：这类题干本质是「回忆原文」，真实考题不会这么问
+_MATERIAL_CITATION = re.compile(
+    r"笔记(?:中|里|上)?(?:提到|所说|所述|讲到)"
+    r"|老师(?:说|讲|举例|强调|提到)"
+    r"|视频(?:中|里)"
+    r"|课上(?:说|讲|提到)"
+    r"|教材(?:中|里)"
+)
+# 拿老师随口举的场景凑出来的题
+_EXAMPLE_SCENE = re.compile(r"某(?:台|个)?(?:服务器|机器|机房|公司|学校)|假设有\s*\d+\s*台")
+# 选项全是 10%、30% 这种纯数字，说明是从例子里抄的
+_PURE_NUMBER_OPTION = re.compile(r"^(?:[A-Da-d][.、．)]\s*)?\d+(?:\.\d+)?\s*[%％]?$")
+# 出现这些单位/概念时，数字可能是考纲要求记住的常量，不能一刀切
+_NUMBER_HINTS = (
+    "页", "块", "字节", "位", "KB", "MB", "GB", "ns", "ms", "us", "μs",
+    "端口", "复杂度", "容量", "频率", "带宽", "速率",
+)
+
+
+def _is_low_value(question: dict[str, Any]) -> bool:
+    """判断一道题是不是「背例子细节」的低价值题。"""
+    body = str(question.get("question") or "")
+    if _MATERIAL_CITATION.search(body) or _EXAMPLE_SCENE.search(body):
+        return True
+    options = question.get("options") or []
+    if len(options) >= 2 and all(_PURE_NUMBER_OPTION.match(option) for option in options):
+        if not any(hint in body for hint in _NUMBER_HINTS):
+            return True
+    return False
+
+
+def filter_questions(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """剔除低价值题并去重。
+
+    宁可比要求少一两道，也不要让用户去背老师随口举的数字。
+    """
+    kept: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for question in questions:
+        if _is_low_value(question):
+            continue
+        key = re.sub(r"\s+", "", str(question.get("question") or ""))
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        kept.append(question)
+    return kept
+
+
+def question_gaps(questions: list[dict[str, Any]], count: int) -> list[str]:
+    """检查题量、题型与难度配额，返回差距描述；空列表表示合格。
+
+    模型经常偷懒：easy 一多、hard 就没了，所以光在提示词里写「各至少 3 题」不够，
+    得真检查一遍。
+    """
+    gaps: list[str] = []
+    if len(questions) < count:
+        gaps.append(f"题量只有 {len(questions)} 道，需要 {count} 道")
+    types: dict[str, int] = {}
+    levels: dict[str, int] = {}
+    for question in questions:
+        types[question["type"]] = types.get(question["type"], 0) + 1
+        levels[question["difficulty"]] = levels.get(question["difficulty"], 0) + 1
+    if types.get("single", 0) < 4:
+        gaps.append(f"选择题只有 {types.get('single', 0)} 道，至少 4 道")
+    if types.get("judge", 0) < 2:
+        gaps.append(f"判断题只有 {types.get('judge', 0)} 道，至少 2 道")
+    if types.get("short", 0) + types.get("blank", 0) < 2:
+        gaps.append("简答题少于 2 道")
+    if levels.get("easy", 0) > 5:
+        gaps.append(f"easy 有 {levels.get('easy', 0)} 道，最多 5 道")
+    if levels.get("medium", 0) < 3:
+        gaps.append(f"medium 只有 {levels.get('medium', 0)} 道，至少 3 道")
+    if levels.get("hard", 0) < 3:
+        gaps.append(f"hard 只有 {levels.get('hard', 0)} 道，至少 3 道")
+    return gaps
 
 
 class SummaryService:
@@ -768,13 +858,49 @@ class SummaryService:
         )
         if progress:
             progress(0, "正在生成练习题")
+        course = self._course_name(job_id)
         prompt = (
             QUESTION_PROMPT.replace("{{TITLE}}", title or "本节课程")
             .replace("{{COUNT}}", str(count))
+            .replace("{{SYLLABUS}}", syllabus_block(course, title or "", summary))
             .replace("{{CONTENT}}", summary)
         )
         raw = provider.complete(prompt, cancelled, purpose="questions")
-        questions = parse_questions(raw)
+        questions = filter_questions(parse_questions(raw))
+
+        gaps = question_gaps(questions[:count], count)
+        if gaps:
+            # 配额不合格就补一次：把差距原样告诉模型，只重试一次，避免无限烧 token
+            retry_prompt = (
+                f"{prompt}\n\n【上一次输出不合格】{'；'.join(gaps)}。"
+                "请重写整套题：hard 不够就补对比、边界条件、给条件计算的题"
+                "（例如两种结构/两种算法的取舍、某种做法在什么情况下失效）；"
+                "easy 太多就合并或改写为因果题；题型也按配额补齐。"
+                "只输出完整的 JSON 数组。"
+            )
+            try:
+                raw = provider.complete(retry_prompt, cancelled, purpose="questions")
+                retried = filter_questions(parse_questions(raw))
+            except ProviderError:
+                retried = []
+            if retried and not question_gaps(retried[:count], count):
+                questions = retried
+            elif len(retried) > len(questions):
+                questions = retried
+
         if not questions:
             raise ProviderError("练习题生成失败：模型没有返回可解析的题目。")
         return questions[:count]
+
+    def _course_name(self, job_id: str) -> str:
+        """出题时带上课程名，章节匹配会更准（同一份笔记在不同课程里可能意思不同）。"""
+        if not job_id or not self.database:
+            return ""
+        try:
+            job = self.database.get_job(job_id)
+            if not job or not job.get("course_id"):
+                return ""
+            course = self.database.get_course(job["course_id"])
+            return (course or {}).get("name", "") or ""
+        except Exception:
+            return ""

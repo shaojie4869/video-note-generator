@@ -1,9 +1,13 @@
+import json
+
 from study_buddy.summarizer import (
+    QUESTION_PROMPT,
     OpenAICompatibleProvider,
     SummaryService,
     _combine_prompt,
     _review_prompt,
     _single_prompt,
+    filter_questions,
     split_transcript,
 )
 
@@ -279,3 +283,174 @@ def test_usage_recorder_failure_does_not_break_call(monkeypatch):
     monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: FakeResponse())
     provider = OpenAICompatibleProvider(StubSettings(), boom, "job3")
     assert provider.complete("你好") == "ok"
+
+
+OS_SUMMARY = """## 本节要解决什么问题
+虚拟化的目的是把一台物理机切成多台虚拟机。
+
+## 知识点详解
+### 微内核
+- **要解决什么**：把内核里只保留最基本的功能，其余移到用户态。
+
+## 考点提示
+- 微内核：只保留进程切换、中断处理、IPC；408 只要求掌握主要思路。
+"""
+
+
+def test_question_prompt_forbids_example_details():
+    for phrase in ("举例里的数字", "笔记中提到", "常见误解", "概念归属与辨析"):
+        assert phrase in QUESTION_PROMPT
+
+
+def test_filter_questions_drops_number_trivia_and_material_citations():
+    questions = [
+        {
+            "type": "single",
+            "question": "某服务器 CPU 长期只被使用多少？",
+            "options": ["A. 10%", "B. 30%", "C. 50%", "D. 90%"],
+            "answer": "A",
+            "topic": "虚拟化",
+        },
+        {
+            "type": "judge",
+            "question": "笔记中提到，微内核只保留最基本的功能。",
+            "options": [],
+            "answer": "正确",
+            "topic": "微内核",
+        },
+        {
+            "type": "single",
+            "question": "Cache 行大小通常是多少？",
+            "options": ["A. 32B", "B. 64B", "C. 128B", "D. 256B"],
+            "answer": "B",
+            "topic": "Cache",
+        },
+        {
+            "type": "single",
+            "question": "下列哪项属于虚拟化要解决的主要问题？",
+            "options": ["A. 提高硬件利用率", "B. 提升主频", "C. 降低功耗", "D. 增加带宽"],
+            "answer": "A",
+            "topic": "虚拟化",
+        },
+    ]
+    kept = filter_questions(questions)
+    assert [item["question"] for item in kept] == [
+        "Cache 行大小通常是多少？",
+        "下列哪项属于虚拟化要解决的主要问题？",
+    ]
+
+
+def test_generate_questions_injects_syllabus_and_filters_low_value(monkeypatch):
+    captured = {}
+
+    def fake_complete(self, prompt, cancelled=None, **kwargs):
+        captured["prompt"] = prompt
+        return json.dumps(
+            [
+                {
+                    "type": "single",
+                    "question": "某服务器 CPU 长期只被使用多少？",
+                    "options": ["A. 10%", "B. 30%", "C. 50%", "D. 90%"],
+                    "answer": "A",
+                    "explanation": "",
+                    "topic": "虚拟化",
+                    "difficulty": "easy",
+                },
+                {
+                    "type": "single",
+                    "question": "下列哪项属于虚拟化要解决的主要问题？",
+                    "options": ["A. 提高硬件利用率", "B. 提升主频", "C. 降低功耗", "D. 增加带宽"],
+                    "answer": "A",
+                    "explanation": "虚拟化让多台虚拟机复用物理机",
+                    "topic": "虚拟化的目的",
+                    "difficulty": "easy",
+                },
+            ]
+        )
+
+    monkeypatch.setattr(OpenAICompatibleProvider, "complete", fake_complete)
+    service = SummaryService(StubSettings())
+    questions = service.generate_questions("1-4 操作系统结构", OS_SUMMARY, count=12)
+
+    assert [item["question"] for item in questions] == [
+        "下列哪项属于虚拟化要解决的主要问题？"
+    ]
+    prompt = captured["prompt"]
+    assert "408 考纲定位" in prompt
+    assert "操作系统 · 第1章 操作系统概述" in prompt
+    assert "题干和答案的事实必须来自笔记" in prompt
+
+
+def _compliant_questions():
+    items = []
+    for index in range(6):
+        items.append(
+            {
+                "type": "single",
+                "question": f"单选题{index}",
+                "options": ["A. 一", "B. 二"],
+                "answer": "A",
+                "explanation": "",
+                "topic": "t",
+                "difficulty": ["easy", "medium", "hard"][index % 3],
+            }
+        )
+    for index in range(3):
+        items.append(
+            {
+                "type": "judge",
+                "question": f"判断题{index}",
+                "options": [],
+                "answer": "正确",
+                "explanation": "",
+                "topic": "t",
+                "difficulty": ["medium", "hard", "hard"][index],
+            }
+        )
+    for index in range(3):
+        items.append(
+            {
+                "type": "short",
+                "question": f"简答题{index}",
+                "options": [],
+                "answer": "答",
+                "explanation": "",
+                "topic": "t",
+                "difficulty": ["medium", "hard", "hard"][index],
+            }
+        )
+    return items
+
+
+def test_generate_questions_retries_once_when_quota_unmet(monkeypatch):
+    calls = []
+
+    def fake_complete(self, prompt, cancelled=None, **kwargs):
+        calls.append(prompt)
+        if len(calls) == 1:
+            # 第一次全出成 easy 单选题：难度和题型配额都不合格
+            return json.dumps(
+                [
+                    {
+                        "type": "single",
+                        "question": f"送分题{index}",
+                        "options": ["A. 一", "B. 二"],
+                        "answer": "A",
+                        "explanation": "",
+                        "topic": "t",
+                        "difficulty": "easy",
+                    }
+                    for index in range(12)
+                ]
+            )
+        return json.dumps(_compliant_questions(), ensure_ascii=False)
+
+    monkeypatch.setattr(OpenAICompatibleProvider, "complete", fake_complete)
+    service = SummaryService(StubSettings())
+    questions = service.generate_questions("1-4 操作系统结构", OS_SUMMARY, count=12)
+
+    assert len(calls) == 2
+    assert "上一次输出不合格" in calls[1]
+    assert "hard" in calls[1]
+    assert questions[0]["question"] == "单选题0"
+    assert len(questions) == 12
