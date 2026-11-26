@@ -770,10 +770,21 @@ function startRenameJob() {
 
 function createJob(payload, button) {
   withBusy(button, async () => {
-    const result = await api('/api/jobs', {
-      method: 'POST',
-      body: JSON.stringify(payload)
-    });
+    let result;
+    try {
+      result = await api('/api/jobs', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      // 重做笔记要重新读原视频：文件被挪走/删掉时，顺手把「重出题目」这条替代路径说清楚
+      if (payload.force && /本地文件不存在|请重新选择/.test(error.message || '')) {
+        throw new ApiError(
+          '原视频不在原位置，没法重做笔记；如果只是想换练习题，点练习题区的「重出题目」。'
+        );
+      }
+      throw error;
+    }
     if (!result.job || !result.job.id) {
       throw new ApiError('服务未返回有效的任务信息。');
     }
@@ -863,7 +874,10 @@ async function refreshJobs({ initial = false } = {}) {
           initial || !current || current.id !== state.selectedId ||
           current.transcript === undefined || current.summary === undefined ||
           ACTIVE_STATUSES.has(listed.status) || ACTIVE_STATUSES.has(current.status) ||
-          listed.status !== current.status
+          listed.status !== current.status ||
+          // 列表行比手里的详情新（改名、移课、重出题目）就重新拉详情，
+          // 否则另一个窗口里改过的题目，这边永远看不到
+          (listed.updated_at && current.updated_at && listed.updated_at !== current.updated_at)
         );
         if (needsDetail) {
           await loadJob(state.selectedId, { silent: !initial });
@@ -1912,7 +1926,13 @@ function wrongCountOf(job, index) {
 }
 
 function quizRenderKey(job) {
-  return [job.id, parseJobQuestions(job).length, state.quizSortByLevel ? 'sorted' : 'plain'].join(':');
+  return [
+    job.id,
+    // 题目被重出后题量可能不变，只看数量会让页面一直显示旧题
+    job.updated_at || '',
+    parseJobQuestions(job).length,
+    state.quizSortByLevel ? 'sorted' : 'plain'
+  ].join(':');
 }
 
 function applyModuleVisibility() {

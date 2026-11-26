@@ -883,10 +883,13 @@ class SummaryService:
                 retried = filter_questions(parse_questions(raw))
             except ProviderError:
                 retried = []
-            if retried and not question_gaps(retried[:count], count):
-                questions = retried
-            elif len(retried) > len(questions):
-                questions = retried
+            if retried:
+                retry_gaps = question_gaps(retried[:count], count)
+                # 谁更接近配额就用谁：第一次重试仍不合格时，只要差距变小也算改进
+                if len(retry_gaps) < len(gaps) or (
+                    len(retry_gaps) == len(gaps) and len(retried) > len(questions)
+                ):
+                    questions = retried
 
         if not questions:
             raise ProviderError("练习题生成失败：模型没有返回可解析的题目。")
