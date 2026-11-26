@@ -610,6 +610,54 @@ def _review_prompt(title: str, draft: str, source: str) -> str:
 
 
 QUESTION_COUNT = 12
+QUESTION_COUNT_MIN = 6
+QUESTION_COUNT_MAX = 24
+# 题量按笔记字数分档：一篇 2 千字的短笔记硬塞 12 题只能靠凑，
+# 一篇 2 万字的大课只出 12 题又覆盖不到一半知识点。
+_QUESTION_TIERS = (
+    (2000, 6),
+    (3500, 8),
+    (5500, 10),
+    (8000, 12),
+    (11000, 14),
+    (14000, 16),
+    (18000, 18),
+)
+
+
+def question_count_for(summary: str) -> int:
+    """按笔记字数决定出几道题（页面不传题量时的默认值）。"""
+    text = (summary or "").strip()
+    if not text:
+        return QUESTION_COUNT_MIN
+    chars = len(text)
+    for limit, value in _QUESTION_TIERS:
+        if chars < limit:
+            return value
+    # 一万八千字以上：再大的课也不无限加，最多 24 题（再多也复习不完）
+    return 22 if chars < 24000 else QUESTION_COUNT_MAX
+
+
+def question_mix(count: int) -> dict[str, int]:
+    """按题量给出题型与难度目标，各项之和等于 count。"""
+    count = max(QUESTION_COUNT_MIN, min(int(count), QUESTION_COUNT_MAX))
+    singles = max(3, round(count * 0.5))
+    judges = max(2, round(count * 0.25))
+    shorts = count - singles - judges
+    while shorts < 2 and singles > 2:
+        singles -= 1
+        shorts += 1
+    easy = round(count / 3)
+    medium = round(count / 3)
+    hard = count - easy - medium
+    return {
+        "single": singles,
+        "judge": judges,
+        "short": shorts,
+        "easy": easy,
+        "medium": medium,
+        "hard": hard,
+    }
 
 QUESTION_PROMPT = """你是 408 计算机考研的出题老师。请根据下面的学习笔记，为课程《{{TITLE}}》出 {{COUNT}} 道复习题。
 
@@ -626,10 +674,10 @@ QUESTION_PROMPT = """你是 408 计算机考研的出题老师。请根据下面
 7. 选择题的每个错误选项都要对应一个真实的常见误解（例如把「提高利用率」错成「提高主频」），不要用互不相干的数字凑选项。
 
 【三、难度与题型】
-8. 难度按题量三等分，且 hard 不得少于 3 题（12 题时按 easy 4、medium 4、hard 4 分配）：
-   easy = 概念归属与辨析（不背数字）；medium = 因果与条件（为什么、在什么前提下成立）；hard = 对比、边界或计算（给条件推结论，或两种方案怎么选）。
-9. 题型按比例混合（12 题时：选择题 6、判断题 3、简答题 3）；选择题不少于三分之一，判断题和简答题各不少于 2 题，合计 {{COUNT}} 题。
-10. 每题都能独立作答；答案写具体结论，禁止「见笔记」「参考原文」；解析用一句话说明考什么、为什么这样答。
+8. 难度按题量分配：easy {{EASY}} 道（概念归属与辨析，不背数字）；medium {{MEDIUM}} 道（因果与条件：为什么、在什么前提下成立）；hard {{HARD}} 道（对比、边界或计算：给条件推结论，或两种方案怎么选）。hard 不得少于全卷的三分之一。
+9. 题型按题量分配：选择题 {{SINGLE}} 道、判断题 {{JUDGE}} 道、简答题 {{SHORT}} 道，合计 {{COUNT}} 道。
+10. 题量已经按本篇笔记的篇幅定好（笔记越长、知识点越多，题目越多），不要再自行增减；请把每道题落在不同的知识点上，不要为了凑数重复同一考点。
+11. 每题都能独立作答；答案写具体结论，禁止「见笔记」「参考原文」；解析用一句话说明考什么、为什么这样答。
 
 {{SYLLABUS}}
 
@@ -759,28 +807,29 @@ def question_gaps(questions: list[dict[str, Any]], count: int) -> list[str]:
     """检查题量、题型与难度配额，返回差距描述；空列表表示合格。
 
     模型经常偷懒：easy 一多、hard 就没了，所以光在提示词里写「各至少 3 题」不够，
-    得真检查一遍。
+    得真检查一遍。配额随题量浮动（见 question_mix），短笔记不强求 12 题的分布。
     """
     gaps: list[str] = []
     if len(questions) < count:
         gaps.append(f"题量只有 {len(questions)} 道，需要 {count} 道")
+    target = question_mix(count)
     types: dict[str, int] = {}
     levels: dict[str, int] = {}
     for question in questions:
         types[question["type"]] = types.get(question["type"], 0) + 1
         levels[question["difficulty"]] = levels.get(question["difficulty"], 0) + 1
-    if types.get("single", 0) < 4:
-        gaps.append(f"选择题只有 {types.get('single', 0)} 道，至少 4 道")
-    if types.get("judge", 0) < 2:
-        gaps.append(f"判断题只有 {types.get('judge', 0)} 道，至少 2 道")
-    if types.get("short", 0) + types.get("blank", 0) < 2:
-        gaps.append("简答题少于 2 道")
-    if levels.get("easy", 0) > 5:
-        gaps.append(f"easy 有 {levels.get('easy', 0)} 道，最多 5 道")
-    if levels.get("medium", 0) < 3:
-        gaps.append(f"medium 只有 {levels.get('medium', 0)} 道，至少 3 道")
-    if levels.get("hard", 0) < 3:
-        gaps.append(f"hard 只有 {levels.get('hard', 0)} 道，至少 3 道")
+    if types.get("single", 0) < max(2, target["single"] - 1):
+        gaps.append(f"选择题只有 {types.get('single', 0)} 道，至少 {max(2, target['single'] - 1)} 道")
+    if types.get("judge", 0) < max(1, target["judge"] - 1):
+        gaps.append(f"判断题只有 {types.get('judge', 0)} 道，至少 {max(1, target['judge'] - 1)} 道")
+    if types.get("short", 0) + types.get("blank", 0) < max(1, target["short"] - 1):
+        gaps.append(f"简答题少于 {max(1, target['short'] - 1)} 道")
+    if levels.get("easy", 0) > target["easy"] + 1:
+        gaps.append(f"easy 有 {levels.get('easy', 0)} 道，最多 {target['easy'] + 1} 道")
+    if levels.get("medium", 0) < max(2, target["medium"] - 1):
+        gaps.append(f"medium 只有 {levels.get('medium', 0)} 道，至少 {max(2, target['medium'] - 1)} 道")
+    if levels.get("hard", 0) < max(2, target["hard"] - 1):
+        gaps.append(f"hard 只有 {levels.get('hard', 0)} 道，至少 {max(2, target['hard'] - 1)} 道")
     return gaps
 
 
@@ -842,15 +891,17 @@ class SummaryService:
         progress: Callable[[int, str], None] | None = None,
         cancelled: threading.Event | None = None,
         job_id: str = "",
-        count: int = QUESTION_COUNT,
+        count: int | None = None,
     ) -> list[dict[str, Any]]:
         """依据已生成的笔记出练习题。
 
         用笔记而不是原始转写：笔记已经去过噪、纠过错字、分好章节，出题命中率更高，
-        也省一半输入 token。
+        也省一半输入 token。题量按笔记字数自动规划，长课多出、短课少出。
         """
         if not summary.strip():
             raise ProviderError("没有可出题的笔记内容。")
+        count = count or question_count_for(summary)
+        mix = question_mix(count)
         provider = OpenAICompatibleProvider(
             self.settings,
             self.database.add_usage if self.database else None,
@@ -862,6 +913,12 @@ class SummaryService:
         prompt = (
             QUESTION_PROMPT.replace("{{TITLE}}", title or "本节课程")
             .replace("{{COUNT}}", str(count))
+            .replace("{{EASY}}", str(mix["easy"]))
+            .replace("{{MEDIUM}}", str(mix["medium"]))
+            .replace("{{HARD}}", str(mix["hard"]))
+            .replace("{{SINGLE}}", str(mix["single"]))
+            .replace("{{JUDGE}}", str(mix["judge"]))
+            .replace("{{SHORT}}", str(mix["short"]))
             .replace("{{SYLLABUS}}", syllabus_block(course, title or "", summary))
             .replace("{{CONTENT}}", summary)
         )

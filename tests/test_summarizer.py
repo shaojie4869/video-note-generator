@@ -8,6 +8,9 @@ from study_buddy.summarizer import (
     _review_prompt,
     _single_prompt,
     filter_questions,
+    question_count_for,
+    question_gaps,
+    question_mix,
     split_transcript,
 )
 
@@ -454,3 +457,56 @@ def test_generate_questions_retries_once_when_quota_unmet(monkeypatch):
     assert "hard" in calls[1]
     assert questions[0]["question"] == "单选题0"
     assert len(questions) == 12
+
+
+def test_question_count_scales_with_note_length():
+    assert question_count_for("") == 6
+    assert question_count_for("字" * 1200) == 6
+    assert question_count_for("字" * 3000) == 8
+    assert question_count_for("字" * 5000) == 10
+    assert question_count_for("字" * 7600) == 12
+    assert question_count_for("字" * 9000) == 14
+    assert question_count_for("字" * 12000) == 16
+    assert question_count_for("字" * 15000) == 18
+    assert question_count_for("字" * 21000) == 22
+    assert question_count_for("字" * 40000) == 24
+    # 单调不减：越长的笔记不能反而出更少的题
+    lengths = [500, 2500, 4000, 7000, 9500, 12000, 16000, 20000, 30000]
+    counts = [question_count_for("字" * n) for n in lengths]
+    assert counts == sorted(counts)
+
+
+def test_question_mix_sums_to_count_and_keeps_three_types():
+    for count in (6, 8, 10, 12, 14, 16, 18, 22, 24):
+        mix = question_mix(count)
+        assert mix["single"] + mix["judge"] + mix["short"] == count
+        assert mix["easy"] + mix["medium"] + mix["hard"] == count
+        assert mix["single"] >= 2 and mix["judge"] >= 1 and mix["short"] >= 2
+        assert mix["hard"] >= 2
+
+
+def test_question_gaps_follow_dynamic_quota():
+    # 6 题时按 3/2/2 的分布算合格，不会拿 12 题的标准去要求短笔记
+    small = [
+        {"type": "single", "difficulty": "easy"},
+        {"type": "single", "difficulty": "medium"},
+        {"type": "single", "difficulty": "hard"},
+        {"type": "judge", "difficulty": "medium"},
+        {"type": "judge", "difficulty": "hard"},
+        {"type": "short", "difficulty": "hard"},
+    ]
+    assert question_gaps(small, 6) == []
+    # 同样是这 6 道题，按 16 题标准就不合格
+    assert question_gaps(small, 16)
+
+    big = [
+        {"type": "single", "difficulty": level} for level in ("easy", "easy", "medium", "medium", "hard", "hard")
+    ] + [
+        {"type": "single", "difficulty": level} for level in ("easy", "medium", "hard")
+    ] + [
+        {"type": "judge", "difficulty": level} for level in ("medium", "hard", "hard")
+    ] + [
+        {"type": "short", "difficulty": level} for level in ("medium", "hard", "hard")
+    ]
+    assert len(big) == 15
+    assert question_gaps(big, 15) == []
