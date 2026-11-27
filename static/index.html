@@ -496,6 +496,23 @@
     <button class="hl-clear" type="button" data-action="clear">清除</button>
   </div>
 
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+    <div class="dialog-header">
+      <div>
+        <p class="eyebrow">请确认</p>
+        <h2 id="confirm-title">重新生成笔记？</h2>
+      </div>
+    </div>
+    <div class="dialog-body confirm-body">
+      <p id="confirm-message" class="confirm-message"></p>
+      <p class="confirm-tip">重新生成会重新调用模型并消耗 token，确认后再开始。</p>
+    </div>
+    <div class="confirm-actions">
+      <button id="confirm-cancel" class="button button-secondary" type="button">取消</button>
+      <button id="confirm-ok" class="button button-primary" type="button">确定重新生成</button>
+    </div>
+  </dialog>
+
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
 </body>
 </html>

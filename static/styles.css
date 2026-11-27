@@ -3095,7 +3095,7 @@ mark.search-mark {
 
 .records-row {
   display: grid;
-  grid-template-columns: 116px minmax(0, 1fr) 96px 138px;
+  grid-template-columns: 116px minmax(0, 1fr) 92px 176px;
   gap: 12px;
   align-items: center;
   padding: 11px 6px;
@@ -3134,7 +3134,9 @@ mark.search-mark {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 8px;
+  /* 「2.9 万 · 失败」这类文字不能被挤成两行，否则按钮会跟着错位 */
+  white-space: nowrap;
 }
 
 .records-cancel {
@@ -3233,4 +3235,71 @@ mark.search-mark {
   height: 1px;
   margin: 5px 8px;
   background: var(--border);
+}
+
+/* 生成记录行内的「重新生成」：和「取消」同尺寸，但走中性色，
+   避免整列看起来全是警告 */
+.records-retry {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: #fff;
+  color: #5b5470;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.records-retry:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--surface-subtle);
+}
+
+.records-retry:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 花钱操作的二次确认 */
+.confirm-dialog {
+  width: min(440px, calc(100% - 32px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text);
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(88, 60, 160, 0.3);
+}
+
+.confirm-dialog::backdrop {
+  background: rgba(48, 38, 74, 0.42);
+  backdrop-filter: blur(3px);
+}
+
+.confirm-body {
+  max-height: none;
+  padding: 16px 22px 2px;
+}
+
+.confirm-message {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.75;
+}
+
+.confirm-tip {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 22px 18px;
 }

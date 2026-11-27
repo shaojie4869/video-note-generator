@@ -99,6 +99,7 @@ function init() {
     'module-nav', 'module-notes', 'module-quiz', 'nav-notes-meta', 'nav-quiz-meta',
     'quiz-list', 'quiz-empty', 'quiz-empty-text', 'quiz-generate', 'quiz-regenerate', 'quiz-sort-by-level',
     'backend-stale', 'text-menu',
+    'confirm-dialog', 'confirm-title', 'confirm-message', 'confirm-ok', 'confirm-cancel',
     'general-form', 'frames-enabled', 'frame-interval', 'max-frames', 'deep-refine', 'exam-mode', 'whisper-model',
     'whisper-device', 'whisper-compute-type', 'chunk-chars', 'save-general', 'general-status',
     'api-form', 'api-configured', 'api-base-url', 'api-model', 'api-vision-model', 'api-reasoning-effort', 'api-key', 'fetch-models', 'models-status', 'model-toggle', 'model-menu', 'vision-toggle', 'vision-menu', 'save-api', 'test-api', 'api-status',
@@ -182,6 +183,12 @@ function bindEvents() {
     }
   });
   elements.recordsOpen.addEventListener('click', openRecords);
+  elements.confirmOk.addEventListener('click', () => {
+    elements.confirmDialog.close('confirm');
+  });
+  elements.confirmCancel.addEventListener('click', () => {
+    elements.confirmDialog.close('cancel');
+  });
   setupSearch();
   setupHighlightPalette();
   elements.courseMore.addEventListener('click', (event) => {
@@ -697,9 +704,17 @@ function createBatch(payloads, button) {
   });
 }
 
-function regenerateSelectedJob() {
+async function regenerateSelectedJob() {
   const job = state.currentJob;
   if (!job || ACTIVE_STATUSES.has(job.status)) {
+    return;
+  }
+  const confirmed = await askConfirm({
+    title: '重新生成这篇笔记？',
+    message: `《${job.title || '未命名任务'}》会按原视频重新生成学习笔记和练习题。上次已完成的转写会直接复用，不会重新转写。`,
+    confirmText: '确定重新生成'
+  });
+  if (!confirmed) {
     return;
   }
   createJob({
@@ -772,6 +787,49 @@ function startRenameJob() {
     }
   });
   input.addEventListener('blur', () => finish(true));
+}
+
+/**
+ * 花钱的操作先问一句。用 <dialog> 而不是 window.confirm：
+ * WebView 里原生对话框不可靠（改标题当初就是因为这个自己画的输入框）。
+ */
+function askConfirm({ title, message, confirmText = '确定' }) {
+  const dialog = elements.confirmDialog;
+  if (!dialog || typeof dialog.showModal !== 'function') {
+    return Promise.resolve(window.confirm(`${title}\n\n${message}`));
+  }
+  elements.confirmTitle.textContent = title;
+  elements.confirmMessage.textContent = message;
+  elements.confirmOk.textContent = confirmText;
+  if (dialog.open) {
+    dialog.close('cancel');
+  }
+  dialog.returnValue = '';
+  dialog.showModal();
+  return new Promise((resolve) => {
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'confirm'), {
+      once: true
+    });
+  });
+}
+
+// 生成记录行内的「重新生成」：先确认再提交，避免误触白烧 token
+async function regenerateJobFromRecords(job, button) {
+  const confirmed = await askConfirm({
+    title: '重新生成这篇笔记？',
+    message: `《${job.title || '未命名任务'}》会按原视频重新生成学习笔记和练习题。上次已完成的转写会直接复用，不会重新转写；新任务在最上面，原来这条记录会保留。`,
+    confirmText: '确定重新生成'
+  });
+  if (!confirmed) {
+    return;
+  }
+  createJob({
+    source_type: job.source_type,
+    source_ref: job.source_ref,
+    title: job.title,
+    entry_index: Number(job.entry_index) || 0,
+    force: true
+  }, button);
 }
 
 function createJob(payload, button) {
@@ -1384,6 +1442,20 @@ function renderRecords() {
         cancelJobById(job.id, cancel);
       });
       tail.appendChild(cancel);
+    } else {
+      // 失败/完成的任务都能一键重来；点完先弹确认，避免误触浪费 token
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'records-retry';
+      retry.textContent = '重新生成';
+      retry.title = job.status === 'failed'
+        ? '按原视频重新生成，会重新调用模型并消耗 token'
+        : '用当前提示词重做这篇笔记，会重新调用模型并消耗 token';
+      retry.addEventListener('click', (event) => {
+        event.stopPropagation();
+        regenerateJobFromRecords(job, retry);
+      });
+      tail.appendChild(retry);
     }
 
     row.append(time, title, cost, tail);
