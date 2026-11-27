@@ -510,3 +510,113 @@ def test_question_gaps_follow_dynamic_quota():
     ]
     assert len(big) == 15
     assert question_gaps(big, 15) == []
+
+
+def test_rate_limit_retries_with_backoff_then_succeeds(monkeypatch):
+    """429 是限流不是故障：按分钟计时，必须等够再重试，不能一次就判死。"""
+    import httpx
+
+    from study_buddy import summarizer as summarizer_module
+
+    class RateLimited:
+        status_code = 429
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"error": {"message": "您的账户已达到速率限制"}}
+
+    class Ok:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "连接成功"}}]}
+
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(1)
+        return RateLimited() if len(calls) < 3 else Ok()
+
+    waits = []
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(
+        OpenAICompatibleProvider, "_wait", lambda self, seconds, cancelled: waits.append(seconds)
+    )
+
+    provider = OpenAICompatibleProvider(StubSettings())
+    assert provider.complete("测试") == "连接成功"
+    assert len(calls) == 3
+    # 第一次 5 秒、第二次 10 秒退避
+    assert sum(waits) >= 15
+
+
+def test_rate_limit_gives_up_after_four_attempts(monkeypatch):
+    import httpx
+
+    from study_buddy import summarizer as summarizer_module
+    from study_buddy.errors import ProviderError
+
+    class RateLimited:
+        status_code = 429
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"error": {"message": "您的账户已达到速率限制，请您控制请求频率"}}
+
+    calls = []
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(1)
+        return RateLimited()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(OpenAICompatibleProvider, "_wait", lambda self, seconds, cancelled: None)
+
+    provider = OpenAICompatibleProvider(StubSettings())
+    try:
+        provider.complete("测试")
+    except ProviderError as exc:
+        assert "速率限制" in str(exc)
+    else:
+        raise AssertionError("一直 429 应该抛 ProviderError")
+    assert len(calls) == 4
+
+
+def test_retry_after_header_is_honoured(monkeypatch):
+    import httpx
+
+    from study_buddy import summarizer as summarizer_module
+
+    class RateLimited:
+        status_code = 429
+        headers = {"Retry-After": "7"}
+
+        @staticmethod
+        def json():
+            return {"error": {"message": "限流"}}
+
+    class Ok:
+        status_code = 200
+        headers = {}
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "好"}}]}
+
+    state = {"n": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        state["n"] += 1
+        return RateLimited() if state["n"] == 1 else Ok()
+
+    waits = []
+    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(
+        OpenAICompatibleProvider, "_wait", lambda self, seconds, cancelled: waits.append(seconds)
+    )
+    provider = OpenAICompatibleProvider(StubSettings())
+    assert provider.complete("测试") == "好"
+    assert sum(waits) == 7

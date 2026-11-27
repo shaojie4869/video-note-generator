@@ -144,19 +144,24 @@ class OpenAICompatibleProvider:
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         url = self.endpoint(base_url)
         response = None
-        # 并发分段时容易撞上瞬时限流（429）或网关抖动（5xx），退避一次再放弃。
-        for attempt in range(2):
+        # 分块并发时很容易撞上限流：429 属于「等一会儿就好」，退避一次不够，
+        # 平台按分钟计时，1.5 秒后重试往往还在窗口里，会把整单判死。
+        attempts = 4
+        for attempt in range(attempts):
             if cancelled and cancelled.is_set():
                 raise JobCancelled()
             try:
                 response = httpx.post(url, headers=headers, json=payload, timeout=600)
             except httpx.HTTPError as exc:
-                if attempt == 0:
-                    time.sleep(1.5)
+                if attempt < 2:
+                    self._wait(1.5 * (attempt + 1), cancelled)
                     continue
                 raise ProviderError(f"API 网络请求失败：{exc}") from exc
-            if response.status_code in {429, 500, 502, 503, 504} and attempt == 0:
-                time.sleep(1.5 + response.status_code % 7)
+            if response.status_code == 429 and attempt < attempts - 1:
+                self._wait(self._retry_after(response, attempt), cancelled)
+                continue
+            if response.status_code in {500, 502, 503, 504} and attempt < 2:
+                self._wait(1.5 + attempt * 2, cancelled)
                 continue
             break
         assert response is not None
@@ -182,6 +187,31 @@ class OpenAICompatibleProvider:
         if not str(content).strip() or str(content).strip().lower() == "none":
             raise ProviderError("API 返回了空总结。")
         return str(content).strip()
+
+    def _wait(self, seconds: float, cancelled: threading.Event | None) -> None:
+        """可被取消的等待：限流退避可能几十秒，期间点取消要能立刻停下。"""
+        deadline = time.monotonic() + max(0.0, seconds)
+        while True:
+            if cancelled and cancelled.is_set():
+                raise JobCancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.5, remaining))
+
+    @staticmethod
+    def _retry_after(response: Any, attempt: int) -> float:
+        """429 优先听服务端给的 Retry-After，没给就指数退避（5/10/20 秒）。"""
+        try:
+            raw = response.headers.get("Retry-After")
+        except (AttributeError, TypeError):
+            raw = None
+        if raw:
+            try:
+                return max(1.0, min(float(raw), 60.0))
+            except (TypeError, ValueError):
+                pass
+        return min(5.0 * (2**attempt), 30.0)
 
     def complete(
         self, prompt: str, cancelled: threading.Event | None = None, purpose: str = "summary"
