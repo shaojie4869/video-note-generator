@@ -19,6 +19,7 @@ from study_buddy.config import BASE_DIR, SettingsManager
 from study_buddy.courses import auto_group, parse_sequence
 from study_buddy.db import MISC_COURSE_ID, Database
 from study_buddy.build_info import build_id
+from study_buddy.errors import ProviderError
 from study_buddy.hardware import profile as hardware_profile
 from study_buddy.jobs import JobManager
 from study_buddy.schemas import (
@@ -273,9 +274,9 @@ def update_job(job_id: str, payload: JobUpdate) -> dict:
         title = payload.title.strip()
         if not title:
             raise HTTPException(status_code=400, detail="标题不能为空。")
-        # 改名时顺带重算章节号：用户可能把「未命名」补成「3-5 虚拟存储器」
-        sequence = parse_sequence(title)
-        database.update_job(job_id, title=title, seq=sequence or job.get("seq", ""))
+        # 改名时重算章节号：以这次解析结果为准，标题里没有编号就清掉旧值，
+        # 否则会留下「无编号标题 + 1-2 徽标」这种对不上的状态。
+        database.update_job(job_id, title=title, seq=parse_sequence(title))
     if payload.course_id is not None:
         course_id = payload.course_id.strip()
         if not course_id:
@@ -457,8 +458,21 @@ def mark_question_wrong(job_id: str, index: int, delta: int = 1) -> dict:
     """答错计数：delta=1 记一次错，delta=-1 撤销误点。"""
     if delta not in (-1, 1):
         raise HTTPException(status_code=400, detail="delta 只能是 1 或 -1。")
-    if not database.get_job(job_id):
+    job = database.get_job(job_id)
+    if not job:
         raise HTTPException(status_code=404, detail="任务不存在。")
+    # 题号必须落在当前题目范围内：否则前端传错下标会写进一条永远没人看到的记录，
+    # 而且重出题目后旧的越界计数还会残留。
+    try:
+        questions = json.loads(job.get("questions") or "[]")
+    except json.JSONDecodeError:
+        questions = []
+    if not isinstance(questions, list) or not questions:
+        raise HTTPException(status_code=400, detail="这篇笔记还没有题目。")
+    if not 0 <= index < len(questions):
+        raise HTTPException(
+            status_code=400, detail=f"题号超出范围：这篇笔记共 {len(questions)} 道题。"
+        )
     count = database.bump_question_wrong(job_id, index, delta)
     return {"index": index, "wrong_count": count}
 

@@ -221,3 +221,101 @@ def test_highlight_endpoints_create_list_and_delete(tmp_path, monkeypatch):
             f"/api/jobs/{job['id']}/highlights", headers=HEADERS
         ).json()["highlights"] == []
         client.delete(f"/api/jobs/{job['id']}", headers=HEADERS)
+
+
+def test_provider_failure_returns_friendly_error(monkeypatch):
+    """API 出错要变成可读的 400，不能因为没导入 ProviderError 变成 500。"""
+    from study_buddy.errors import ProviderError
+    from study_buddy.summarizer import OpenAICompatibleProvider
+
+    def boom(*args, **kwargs):
+        raise ProviderError("密钥无效或余额不足")
+
+    monkeypatch.setattr(OpenAICompatibleProvider, "list_models", boom)
+    monkeypatch.setattr(OpenAICompatibleProvider, "complete", boom)
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        models = client.get("/api/models", headers=HEADERS)
+        assert models.status_code == 400
+        assert "密钥无效" in models.json()["detail"]
+
+        tested = client.post("/api/config/api/test", headers=HEADERS)
+        assert tested.status_code == 400
+        assert "密钥无效" in tested.json()["detail"]
+
+
+def test_rename_job_clears_stale_sequence(tmp_path, monkeypatch):
+    monkeypatch.setattr(application.jobs, "_start", lambda *args: None)
+    video = tmp_path / "seq.mp4"
+    video.write_bytes(b"test")
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        job = client.post(
+            "/api/jobs",
+            headers=HEADERS,
+            json={"source_type": "local", "source_ref": str(video), "title": "1-2 旧标题"},
+        ).json()["job"]
+        assert job["seq"] == "1-2"
+        renamed = client.patch(
+            f"/api/jobs/{job['id']}", headers=HEADERS, json={"title": "没有编号的新标题"}
+        ).json()["job"]
+        assert renamed["seq"] == ""
+        # 再改回带编号的标题，章节号要跟着回来
+        again = client.patch(
+            f"/api/jobs/{job['id']}", headers=HEADERS, json={"title": "3-5 虚拟存储器"}
+        ).json()["job"]
+        assert again["seq"] == "3-5"
+        client.delete(f"/api/jobs/{job['id']}", headers=HEADERS)
+
+
+def test_wrong_count_rejects_out_of_range_index(tmp_path, monkeypatch):
+    monkeypatch.setattr(application.jobs, "_start", lambda *args: None)
+    video = tmp_path / "quiz.mp4"
+    video.write_bytes(b"test")
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        job = client.post(
+            "/api/jobs",
+            headers=HEADERS,
+            json={"source_type": "local", "source_ref": str(video), "title": "1-2 线程"},
+        ).json()["job"]
+        # 还没有题目时也不该写计数
+        assert client.post(
+            f"/api/jobs/{job['id']}/questions/0/wrong", headers=HEADERS
+        ).status_code == 400
+
+        application.database.update_job(
+            job["id"],
+            questions='[{"type": "judge", "question": "q", "answer": "对"}, '
+            '{"type": "judge", "question": "q2", "answer": "对"}]',
+        )
+        assert client.post(
+            f"/api/jobs/{job['id']}/questions/1/wrong", headers=HEADERS
+        ).status_code == 200
+        out_of_range = client.post(
+            f"/api/jobs/{job['id']}/questions/99/wrong", headers=HEADERS
+        )
+        assert out_of_range.status_code == 400
+        assert "题号超出范围" in out_of_range.json()["detail"]
+        assert application.database.get_question_stats(job["id"]) == {"1": 1}
+        client.delete(f"/api/jobs/{job['id']}", headers=HEADERS)
+
+
+def test_regenerate_questions_reports_provider_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(application.jobs, "_start", lambda *args: None)
+    from study_buddy.errors import ProviderError
+
+    def boom(*args, **kwargs):
+        raise ProviderError("模型返回了空内容")
+
+    monkeypatch.setattr(application.summary_service, "generate_questions", boom)
+    video = tmp_path / "quiz2.mp4"
+    video.write_bytes(b"test")
+    with TestClient(application.app, base_url="http://127.0.0.1:8765") as client:
+        job = client.post(
+            "/api/jobs",
+            headers=HEADERS,
+            json={"source_type": "local", "source_ref": str(video), "title": "1-3 调度"},
+        ).json()["job"]
+        application.database.update_job(job["id"], status="completed", summary="## 笔记")
+        response = client.post(f"/api/jobs/{job['id']}/questions", headers=HEADERS)
+        assert response.status_code == 400
+        assert "空内容" in response.json()["detail"]
+        client.delete(f"/api/jobs/{job['id']}", headers=HEADERS)

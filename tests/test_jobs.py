@@ -323,3 +323,23 @@ def test_refresh_bilibili_title_replaces_placeholder(tmp_path):
     manager._refresh_bilibili_title(job["id"], job)
 
     assert database.get_job(job["id"])["title"] == "BOK408 p10 3-4 cache"
+
+
+def test_concurrent_submit_creates_only_one_job(tmp_path, monkeypatch):
+    """两个请求同时提交同一个视频，「查重 + 建档」必须原子，否则会各建一份。"""
+
+    async def scenario():
+        database = Database(tmp_path / "history.db")
+        manager = JobManager(database, settings=None, summary=None)
+        manager._start = lambda *args: None
+        monkeypatch.setattr(
+            JobManager, "cache_key", staticmethod(lambda payload: "same-key")
+        )
+        payload = JobCreate(source_type="local", source_ref="D:/a.mp4")
+        results = await asyncio.gather(manager.create(payload), manager.create(payload))
+        ids = {job["id"] for job, _ in results}
+        assert len(ids) == 1
+        assert sum(1 for _, reused in results if reused) == 1
+        assert len(database.list_jobs()) == 1
+
+    asyncio.run(scenario())

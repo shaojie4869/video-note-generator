@@ -108,20 +108,45 @@ class SettingsManager:
         effort = (reasoning_effort or "").strip()
         if effort not in {"", "low", "high", "max"}:
             effort = "low"
+        new_key = (api_key or "").strip() or None
         with self._lock:
-            old_base_url = self._config["api"].get("base_url", "")
-            base_changed = old_base_url != base_url
-            if base_changed and not self.delete_secret("api_key"):
-                raise RuntimeError("无法安全移除旧 API 密钥，配置未修改。")
-            self._config["api"] = {
-                "base_url": base_url,
-                "model": model.strip(),
-                "vision_model": vision_model.strip(),
-                "reasoning_effort": effort,
-            }
-            self._save()
-        if api_key:
-            keyring.set_password(KEYRING_SERVICE, "api_key", api_key.strip())
+            old_api = dict(self._config["api"])
+            old_key = self.get_secret("api_key")
+            base_changed = old_api.get("base_url", "") != base_url
+            try:
+                if new_key:
+                    self.set_secret("api_key", new_key)
+                elif base_changed:
+                    # 换了服务商，旧密钥对新 base_url 没有意义；
+                    # 但先留着 old_key 的原文，写配置失败时还能退回去。
+                    if not self.delete_secret("api_key"):
+                        raise RuntimeError("无法安全移除旧 API 密钥，配置未修改。")
+                self._config["api"] = {
+                    "base_url": base_url,
+                    "model": model.strip(),
+                    "vision_model": vision_model.strip(),
+                    "reasoning_effort": effort,
+                }
+                self._save()
+            except Exception:
+                # 任一步失败就整体回滚：内存态、磁盘配置、密钥都退回改之前，
+                # 不留下「界面说保存失败，但配置已经变了」这种半截状态。
+                self._config["api"] = old_api
+                self._restore_secret("api_key", old_key)
+                try:
+                    self._save()
+                except OSError:
+                    pass
+                raise
+
+    def _restore_secret(self, name: str, value: str | None) -> None:
+        try:
+            if value:
+                keyring.set_password(KEYRING_SERVICE, name, value)
+            else:
+                keyring.delete_password(KEYRING_SERVICE, name)
+        except keyring.errors.KeyringError:
+            pass
 
     def get_secret(self, name: str) -> str | None:
         try:

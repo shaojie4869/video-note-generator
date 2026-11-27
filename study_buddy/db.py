@@ -411,10 +411,16 @@ class Database:
         }
 
     def usage_summary(self) -> dict[str, Any]:
-        """本月 + 今日消耗汇总，用于界面展示。"""
-        now = datetime.now(timezone.utc)
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+        """本月 + 今日消耗汇总，用于界面展示。
+
+        「今日/本月」按本机时区算：库里存的是 UTC，直接拿 UTC 切零点会让
+        早上 8 点前和月初几小时算到前一天/上一月。
+        """
+        local_now = datetime.now().astimezone()
+        local_month = local_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        local_today = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        month_start = local_month.astimezone(timezone.utc).isoformat()
+        today_start = local_today.astimezone(timezone.utc).isoformat()
         with self._connect() as connection:
             month = connection.execute(
                 """

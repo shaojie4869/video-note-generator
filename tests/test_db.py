@@ -96,3 +96,29 @@ def test_highlights_are_stored_listed_and_removed_with_job(tmp_path):
     database.delete_job(job["id"])
     assert database.list_highlights(job["id"]) == []
     assert database.delete_highlight(job["id"], kept["id"]) is False
+
+
+def test_usage_today_uses_local_midnight(tmp_path):
+    """「今日」按本机时区的零点切，不能按 UTC 切（否则早上 8 点前算到昨天）。"""
+    from datetime import datetime, timedelta, timezone
+
+    database = Database(tmp_path / "history.db")
+    local_start = datetime.now().astimezone().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    inside = local_start + timedelta(minutes=30)
+    before = local_start - timedelta(minutes=30)
+
+    def insert(moment):
+        with database._connect() as connection:
+            connection.execute(
+                "INSERT INTO usage_log (job_id, purpose, model, total_tokens, created_at) "
+                "VALUES ('', 'test', 'm', 100, ?)",
+                (moment.astimezone(timezone.utc).isoformat(),),
+            )
+
+    insert(inside)
+    insert(before)
+    summary = database.usage_summary()
+    assert summary["today"]["calls"] == 1
+    assert summary["today"]["tokens"] == 100

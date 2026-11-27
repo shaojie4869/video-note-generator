@@ -63,6 +63,9 @@ class JobManager:
         self.transcriber = transcriber or Transcriber()
         self._tasks: dict[str, asyncio.Task] = {}
         self._cancelled: dict[str, threading.Event] = {}
+        # 「查重 + 建任务」必须是原子的：两个请求同时进来会都查到「没有活动任务」，
+        # 然后各建一份，重复下载、重复转写、重复烧 API 额度。
+        self._create_lock = asyncio.Lock()
         # 批量生成时用三组独立的闸门，而不是「最多跑 N 个任务」：
         # 各阶段瓶颈不同，串在一条流水线上限流才能真正既不空转、也不过载。
         self.hardware = hardware or hardware_profile()
@@ -83,6 +86,13 @@ class JobManager:
 
     async def create(self, payload: JobCreate) -> tuple[dict[str, Any], bool]:
         cache_key = await asyncio.to_thread(self.cache_key, payload)
+        # 查重与建档串行化：批量和重复点击都走这里，只靠「先查再建」挡不住并发。
+        async with self._create_lock:
+            return await self._create_locked(payload, cache_key)
+
+    async def _create_locked(
+        self, payload: JobCreate, cache_key: str
+    ) -> tuple[dict[str, Any], bool]:
         # 同一个视频只允许一个任务在跑：误点「开始生成」不该重复下载、重复转写。
         # 前端也会在选中项已有任务时禁用按钮，这里是最后一道闸。
         active = await asyncio.to_thread(self.db.find_active, cache_key)

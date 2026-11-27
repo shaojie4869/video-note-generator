@@ -175,6 +175,12 @@ function bindEvents() {
   elements.bilibiliEntries.addEventListener('change', handleBilibiliEntryChange);
   elements.startButton.addEventListener('click', startNewJob);
   elements.courseNew.addEventListener('click', beginNewCourse);
+  elements.courseSelect.addEventListener('change', () => {
+    // 手动选过课程就不再显示「自动：xx」；切回自动时立即重新算一次归属
+    if (!elements.courseSelect.value) {
+      suggestCourse();
+    }
+  });
   elements.recordsOpen.addEventListener('click', openRecords);
   setupSearch();
   setupHighlightPalette();
@@ -1715,15 +1721,13 @@ async function suggestCourse() {
     });
     const result = await api(`/api/courses/suggest?${query.toString()}`);
     const suffix = payloads.length > 1 ? ` 等 ${payloads.length} 个` : '';
-    if (result.course_id) {
-      if (elements.courseSelect.value === '') {
-        elements.courseSelect.value = result.course_id;
-      }
-    } else if (result.name) {
-      auto.textContent = `自动：${result.name}${suffix}`;
-    } else {
-      auto.textContent = '自动：杂项';
+    if (elements.courseSelect.value !== '') {
+      // 用户手动选过课程就尊重它，不要被自动建议覆盖
+      return;
     }
+    // 只改「自动」那一项的文字，不把下拉框钉到某门课上：
+    // 一旦 value 被写成具体课程，它就不再是自动模式，下一批别的视频会跟着归错课程。
+    auto.textContent = result.name ? `自动：${result.name}${suffix}` : '自动：杂项';
   } catch (error) {
     auto.textContent = '自动识别';
   }
